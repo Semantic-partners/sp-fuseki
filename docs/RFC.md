@@ -173,8 +173,14 @@ everything else on," not "can we afford weeks."
 
 ## Distribution & CI
 
-- **Registry:** GHCR — `ghcr.io/semantic-partners/sp-fuseki`. Free for public,
-  trivial to push from Actions. (Mirror to Docker Hub later for discoverability.)
+- **Registry — GHCR primary, Docker Hub mirror.** GHCR
+  (`ghcr.io/semantic-partners/sp-fuseki`) is the canonical home: free, **no pull
+  rate limits** on public images, native `GITHUB_TOKEN` push, first-class
+  cosign/provenance. Docker Hub is *no longer* the right primary — anonymous
+  pulls are throttled to **10/hour** (April 2025), crippling for a public image
+  as a sole source — but it's still where people search and where a bare
+  `docker pull` resolves, so mirror to it for discoverability. Build once, push
+  to both in the same Actions job; the dogfood devcontainer pins the GHCR ref.
 - **Tag scheme — two-axis.** Do **not** tag by Jena version alone: the SP layer
   (entrypoint, renderer) has its own fixes that need version space. Use
   `<jena>-<sp-build>` + variant, e.g. `6.2.0-1`, `6.2.0-1-full`, plus moving
@@ -189,9 +195,23 @@ everything else on," not "can we afford weeks."
 - **Supply chain:** vulnerability scan (Trivy/Grype), SBOM, and signing
   (cosign/sigstore + provenance). An unsigned, unscanned "official SP image"
   undercuts the reputational play.
-- **Bumps:** Renovate watches Jena releases → bump PR → CI re-tests → merge.
-  Near-zero ongoing effort — but don't blind-auto-merge a fresh `.0` the day it
-  drops.
+- **Bumps — the new-Jena signal.** Renovate (not Dependabot — it doesn't bump
+  arbitrary ARGs well) with a custom manager on the Dockerfile's `JENA_VERSION`
+  ARG. Datasource = **Maven Central** `org.apache.jena:jena-fuseki-server` (the
+  authoritative "actually released" signal — a git tag can precede the real
+  release; Maven publication lands in lockstep with `archive.apache.org`, where
+  we pull the dist). `github-tags` on `apache/jena` (`extractVersion=^jena-(?<version>.*)$`)
+  is the alternative.
+
+  ```dockerfile
+  # renovate: datasource=maven depName=org.apache.jena:jena-fuseki-server
+  ARG JENA_VERSION=6.1.0
+  ```
+
+  Renovate opens a bump PR → CI re-tests → merge → `on: push` builds + publishes.
+  Add `on: schedule` (daily poll) as a fallback and `on: workflow_dispatch` for
+  manual. Near-zero ongoing effort — but don't blind-auto-merge a fresh `.0` the
+  day it drops.
 
 ## Maintenance model & risk
 
