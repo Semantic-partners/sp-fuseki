@@ -85,7 +85,7 @@ jobs:
           sbom: true
 
       - name: Trivy scan (report; non-blocking until we triage a baseline)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: sarif
