@@ -4,6 +4,50 @@ Review of [RFC.md](RFC.md). The RFC is solid and the bet is well-framed; what
 follows is where it is thin, ambiguous, or load-bearing on an unstated
 assumption. Ordered roughly by how much each could hurt v0.1.
 
+## What we're actually offering (the thesis)
+
+The RFC names the differentiator as "the whole server as EDN — pure SP 'it's
+just data'." Once we lean TTL-first (weakpoint #9), that's gone, and the obvious
+question is: what's left that isn't just "`apache/jena-fuseki` with our logo"?
+
+The answer isn't the config *format* and isn't ops polish (copyable, thin moat).
+It's **the extension contract, documented** — instead of reverse-engineered from
+five layers of entrypoint bash.
+
+The real pain with stain / secoresearch / the official image isn't that they
+don't work. It's that to learn *how to configure or extend* them you spelunk
+undocumented entrypoint scripts and guess: which mount does what, which env var
+triggers what, why your mounted config got ignored. The extension points are
+*emergent from the script*, never *stated*.
+
+So the product is **the contract, written down and tested**:
+  - what you can mount and exactly what each does (`config.ttl`, `shiro.ini`,
+    data dir, and `fuseki.edn` if EDN ever lands);
+  - every env var and its effect, including the `*_FILE` secret convention (#4);
+  - where the entrypoint writes the rendered config, so you can inspect it (#1);
+  - recipes for the common moves — add a dataset, switch to TDB2, enable a
+    reasoner, turn on auth, enable the UI — not bash-spelunking.
+
+Two earlier decisions become load-bearing under this thesis:
+  - **bb-over-bash (#7) is now justification, not preference.** A legible
+    entrypoint is one whose seams you *can* document and keep honest. Bash
+    accretion is exactly what made the incumbents un-documentable — and what
+    made them rot. We're selling against the thing bash produces.
+  - **TTL-first (#9) stops being a moat-killer.** The moat was never the syntax;
+    it's "the seams are documented." Documented TTL beats EDN you still have to
+    reverse-engineer.
+
+**The strong version — make "documented" a tested claim, not prose:** every
+documented extension point gets a smoke test that exercises it (ties to #6).
+Then the docs are executable-backed; they can't drift from the entrypoint.
+That's the moat ops-quality alone lacks — people choose it because they can
+*understand and trust* it, and the trust is green on every build.
+
+This subsumes the config-as-product vs ops-utility fork: the config model and
+the ops defaults are both just *parts of the documented contract*. The contract
+is the product. (This should flow back into the RFC's **Why** / **Goals** —
+right now the RFC sells EDN; it should sell legibility.)
+
 ## What's already right (don't relitigate)
 
 - **Bet A / Bet B split** (image vs UI) is the correct cut. Keeping the UI out
@@ -148,6 +192,39 @@ v0.2 *only if* TTL ergonomics actually hurt in practice — by then the passthro
 exists, so EDN is safe to bolt on. Don't commit to EDN before feeling the pain
 it solves.
 
+### 10. The UI non-goal conflates "build" with "bundle" — reopen tiers 1–2
+The RFC excludes the UI as "weeks of frontend + ongoing maintenance, keep it
+separate." That reasoning is **only true for a greenfield UI.** It wrongly kills
+two much cheaper options along with it. There are three tiers, not one bet:
+
+| Tier | What | Build cost | Maintenance |
+|---|---|---|---|
+| **1. Keep Fuseki's own UI** | A `full`/`lab` variant that doesn't strip the webapp Fuseki already ships | ~zero (don't pass the strip flag) | bumps with Jena; Apache maintains it |
+| **2. Bundle YASGUI** | Serve the mature OSS query UI pointed at the local endpoint | low/med — base paths, CSP, pinning (the "plugin hell") | Renovate-able; static assets, no server surface |
+| **3. Greenfield CodeMirror-6 UI** | The "YASGUI-killer" | weeks | ongoing — the one that *can't* clear the auto-green bar |
+
+The RFC's "separate product" argument applies to **tier 3 only**. Tiers 1–2 are
+image features, and tier 1 is nearly free.
+
+This matters for the thesis: stain stayed popular *despite* being abandoned
+because it's "Fuseki that just runs, **with a window into your data.**" The real
+papercut isn't "I need a triplestore API," it's "spin one up, load data, and
+*poke at it*" — demo, lab, client spike. An API-only `minimal` image doesn't
+solve that; a batteries-included one does. **The UI option may be the
+differentiator, not scope creep.**
+
+Under the documented-contract thesis, the UI is just another **documented,
+tested extension point**: "set this → get the Fuseki UI / YASGUI; here's exactly
+what it exposes and how auth interacts." The RFC's `:ui {:enabled …}` seam is the
+right hook for all three tiers.
+
+- **Lean:** `minimal` + `full` (tier 1) variants in v0.1/v0.2 — the RFC already
+  has the variant idea, it just deferred the wrong things. Tier 2 (YASGUI) a
+  considered v0.2 variant. Tier 3 stays Bet B, its own project — it's a
+  *product*, not a *seam*.
+- **Caveat:** UI + `:anon` + an exposed update endpoint is a footgun. The UI
+  variant must be auth-aware by default (ties to #4).
+
 ## Secondary gaps
 
 - **Config validation / fail-fast.** Malformed `fuseki.edn` should fail loudly
@@ -188,3 +265,8 @@ it solves.
 7. Add **scan + SBOM + sign** to the CI section.
 8. **Decide config format separately from bb.** Lean TTL-first for v0.1 (no new
    standard); revisit EDN/aero for v0.2.
+9. **Rewrite Why/Goals around the thesis:** the offering is a *documented,
+   tested extension contract* (legibility), not EDN. Lead with that.
+10. **Reopen the UI as tiers:** keep Fuseki's own UI in a `full` variant (tier 1,
+    ~free); YASGUI a v0.2 variant (tier 2); greenfield stays Bet B (tier 3).
+    Make the UI a documented, auth-aware extension point.
