@@ -70,15 +70,20 @@ Otherwise "near-zero ongoing effort" auto-merges a corrupting Jena release.
 (Side note: clarify the "parquet" detail — stock TDB2 isn't parquet-backed;
 which storage/context was this? It affects whether this image is even exposed.)
 
-### 7. babashka entrypoint — the "fast startup" rationale is weak
-You're starting a JVM for Fuseki regardless, so entrypoint startup time is
-noise. The real justification is *EDN ergonomics*, and that's fine — but be
-honest about it, because bb adds a pinned, arch-specific, security-patchable
-dependency (it's the only non-Java custom piece in a multi-arch build). Worth a
-sentence of "we considered plain shell / a tiny Java renderer and chose bb
-because…". The rendering surface for v0.1 is genuinely tiny (the dogfood config
-is two datasets + a handful of endpoints), which *de-risks* bb — but also raises
-"is bb overkill for v0.1?"
+### 7. babashka entrypoint — state the rationale correctly
+The RFC sells bb on "fast startup," which is the weak argument: you're starting
+a JVM for Fuseki regardless, so entrypoint startup time is noise. The real case
+is **a real language instead of bash to orchestrate non-trivial boot logic, at
+near-bash cost** — bb starts fast enough to feel like a shell script but gives
+you EDN parsing, data structures, and proper error handling for the
+render-config-then-exec flow. Boot orchestration that would be brittle in bash
+(parse config → validate → template TTL + shiro → exec) is exactly what bb is
+good at. Say *that*. The honest counterweight: bb adds a pinned, arch-specific,
+security-patchable dependency (the only non-Java custom piece in a multi-arch
+build). The v0.1 rendering surface is tiny (the dogfood config is two datasets +
+a handful of endpoints), so the orchestration argument is strongest as the
+config grows — note that the value compounds with v0.2 (reasoners, auth, tdb2),
+not at v0.1.
 
 ### 8. Supply chain / provenance unaddressed
 For a *public, SP-branded "official"* image, the bar is higher than build+push.
@@ -119,5 +124,6 @@ signing (cosign/sigstore + provenance attestation). An unsigned, unscanned
 3. Either **define or cut `:federation`** for v1.
 4. Add a **secrets/`:basic` auth** subsection.
 5. Expand the smoke test to a **TDB2 durability round-trip**.
-6. Add a one-line **bb rationale** (and the rejected alternatives).
+6. Fix the **bb rationale**: "a real orchestration language vs bash, at
+   near-bash cost," not "fast startup." Note the rejected alternatives.
 7. Add **scan + SBOM + sign** to the CI section.
