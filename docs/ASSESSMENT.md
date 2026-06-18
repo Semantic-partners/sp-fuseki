@@ -46,25 +46,30 @@ federated endpoints, set up a federated/union dataset, or seed a query library.
 As written it's hand-wavy. **Define it concretely or cut it from v1** — shipping
 a config key that does nothing erodes the "config as data" credibility.
 
-### 4. Auth secrets — define the indirection, don't pick a backend
-`:auth {:mode :basic}` needs users + passwords. Best practice here churns and
-there's no clear winner: encrypted-in-repo (SOPS/age/sealed-secrets — a
-legitimate "diffable secrets" school), Vault, env vars, Docker/K8s secrets. **An
-image must not pick a side** — don't ship a Vault client or a SOPS integration.
+### 4. Auth secrets — a shiro-rendering concern, not a config-format one
+`:basic` auth needs users + passwords. Best practice here churns and there's no
+clear winner: encrypted-in-repo (SOPS/age/sealed-secrets — a legitimate
+"diffable secrets" school), Vault, env vars, Docker/K8s secrets. **An image must
+not pick a side** — don't ship a Vault client or a SOPS integration.
 
-Instead define a secret *reference* indirection and resolve it at the boundary.
-Two readers cover all four schools, because every secrets manager ultimately
-delivers to one of two places:
-  - `:password #env FUSEKI_ADMIN_PW` — env (12-factor, K8s env-from-secret,
-    vault-agent env, Docker `_FILE`);
-  - `:password #file "/run/secrets/admin_pw"` — file (Docker/K8s secrets on
-    tmpfs, vault-agent file sink, SOPS-decrypted-at-deploy).
+Crucially, the credential never lives in the *assembler config* (TTL or EDN) at
+all — it lives in `shiro.ini`, which the entrypoint generates regardless of
+config format. So the secret story is a property of the **shiro-rendering step**,
+not of the config syntax. Two format-agnostic mechanisms cover all four schools,
+because every secrets manager ultimately delivers to env or a file:
+  - **env / `*_FILE` convention** read by the entrypoint at boot — e.g.
+    `FUSEKI_ADMIN_PASSWORD` or `FUSEKI_ADMIN_PASSWORD_FILE` (the Docker secrets
+    idiom). Covers 12-factor env, K8s env-from-secret, vault-agent, Docker/K8s
+    file mounts. No secret syntax in any committed config.
+  - **mount your own `shiro.ini`** (passthrough — same contract as weakpoint #1).
+    This *is* the diffable-secrets path: SOPS-decrypt your `shiro.ini` at deploy
+    and mount it.
 
-The config holds a *reference* (data, diffable, safe to commit); the value lives
-at the boundary. Vault injects to file/env → we read it; SOPS decrypts to a file
-→ we read it. The image stays out of the religion. `#env`/`#file` are aero's
-native tags, so going EDN gives this for free. The only real no is a plaintext
-password literal in a committed file.
+The image stays out of the religion either way. (If — and only if — config later
+goes EDN, aero's `#env`/`#file` reader tags are a nice-to-have sugar over the
+same env/file sources; they're not the mechanism, and they don't exist under
+TTL-first.) The only real no is a plaintext password baked into a committed
+config or the image.
 
 ### 5. Non-root + mounted TDB2 volume = classic permission footgun
 v0.2 adds `:tdb2`. Non-root container + host-mounted volume means UID mismatch
@@ -131,8 +136,9 @@ Two reframes defuse it:
     stands *even if config stays TTL.* So the EDN question can be decided on its
     own merits, which opens a cleaner v0.1: **config = assembler TTL (no new
     standard, config is already RDF — maximally "it's just data"); bb just
-    orchestrates** (validate, render `shiro.ini` from `#env`/`#file` refs,
-    healthcheck, exec). The "badly defined TTL semantics" complaint then becomes
+    orchestrates** (validate, render `shiro.ini` from the env/`*_FILE`
+    convention, healthcheck, exec). The "badly defined TTL semantics" complaint
+    then becomes
     a *docs* job (document the vocab, ship worked examples), not a build-a-
     language job.
 
@@ -173,8 +179,8 @@ it solves.
    precedence, and always-dump-rendered-config.
 2. Replace the dogfood tag example with the **two-axis tag scheme**.
 3. Either **define or cut `:federation`** for v1.
-4. Add a **secrets** subsection: `#env`/`#file` reference indirection, image
-   stays backend-agnostic; no plaintext literals committed.
+4. Add a **secrets** subsection: shiro-rendering reads env/`*_FILE` (or mount
+   your own `shiro.ini`); image stays backend-agnostic; no committed plaintext.
 5. Scope the smoke test to the **packaging contract** (boot, endpoints,
    config-honoured, restart-persists wiring) — *not* Jena correctness.
 6. Fix the **bb rationale**: "a real orchestration language vs bash, at
