@@ -200,8 +200,14 @@ figure is inflated. There are three tiers, not one bet:
 | Tier | What | Build cost | Maintenance |
 |---|---|---|---|
 | **1. Keep Fuseki's own UI** | A `full` variant that doesn't strip the webapp Fuseki already ships | ~zero (don't pass the strip flag) | bumps with Jena; Apache maintains it |
-| **2. Bundle + reskin YASGUI** | The OSS query UI, skinned — "YASGUI without the plugin hell" | **~1–2 days** (Lance has done it pre-Claude) | Renovate-able; static assets, no server surface |
-| **3. Bespoke CodeMirror-6 UI** | A fully custom UI from scratch | more than tier 2, **not "weeks" by default** | ongoing — the upkeep, not the build, is the cost |
+| **2. Thin CodeMirror web component** | SPARQL editor + results, built fresh on the CodeMirror config | ~the old YASGUI-reskin budget, but clean | static assets, no server surface; framework-free |
+| **3. Fuller bespoke UI** | tier 2 + prefixes/history/viz; maybe a standalone app | more than tier 2, **not "weeks" by default** | ongoing — the upkeep, not the build, is the cost |
+
+**Rejected: reskinning YASGUI.** Its only real value is the CodeMirror config;
+the rest is the plugin-hell wrapper you fight. Lift the config directly, build a
+thin shell. **Web component over React** for an image-embeddable asset: no
+framework runtime, portable, CSP-friendly, drop-in, reusable against any
+endpoint. React only if tier 3 becomes a standalone app.
 
 The RFC's "separate product" argument applies to **tier 3 only**, and even there
 the real gate is **opportunity cost** ("is it a *useful* couple of days given

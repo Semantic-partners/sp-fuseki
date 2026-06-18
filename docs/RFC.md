@@ -139,14 +139,20 @@ school, because they all deliver to env or a file:
 
 ### The UI, as tiers
 
-A UI is not one bet. There are three tiers; the RFC originally conflated them
-and over-stated the cost:
+A UI is not one bet, and the RFC originally over-stated the cost. The tiers:
 
 | Tier | What | Cost | Status |
 |---|---|---|---|
 | **1. Keep Fuseki's own UI** | `full` variant that doesn't strip the webapp Fuseki ships | ~zero | v0.1/v0.2 |
-| **2. Bundle + reskin YASGUI** | the OSS query UI, skinned, "YASGUI without the plugin hell" | ~1–2 days (Lance has done this pre-Claude) | v0.2 variant |
-| **3. Bespoke CodeMirror-6 UI** | a fully custom UI from scratch | more than tier 2, but the gate is *opportunity cost*, not build difficulty | Bet B, separate |
+| **2. Thin CodeMirror web component** | SPARQL editor + results, built fresh on the CodeMirror config — framework-free, embeddable | ~the old YASGUI-reskin budget, but clean (no wrapper debt) | v0.2 variant |
+| **3. Fuller bespoke UI** | tier 2 + prefixes / history / result viz; possibly a standalone app | more than tier 2; gate is *opportunity cost*, not build difficulty | Bet B, separate |
+
+**Rejected: reskinning YASGUI.** Its only real value is the CodeMirror config;
+the rest is the plugin-hell wrapper you end up fighting. Lift the CodeMirror
+config directly and build a thin shell — skip the wrapper. **Web component, not
+React:** zero framework runtime, portable, CSP-friendly static assets, drop-in
+to the `full` variant or any page, reusable against any endpoint (on-brand "it's
+just data"). React only earns its keep if tier 3 grows into a standalone app.
 
 The real papercut is "spin one up, load data, and *poke at it*" — an API-only
 image doesn't solve it; a batteries-included one does. stain stayed popular
@@ -204,7 +210,7 @@ everything else on," not "can we afford weeks."
   sign + SBOM, packaging smoke test, README + documented extension points.
 - **v0.2** — `tdb2` storage (+ documented volume/UID contract), `:basic` auth,
   reasoner options, optional EDN/aero convenience layer (decided on merits),
-  reskinned-YASGUI variant (tier 2), Renovate wired.
+  CodeMirror web-component UI variant (tier 2), Renovate wired.
 - **later** — Bet B (bespoke UI tier 3) as its own decision, slotting into the
   same `:ui` seam.
 
@@ -224,5 +230,6 @@ cleared a real cohort.
   from the bb decision.
 - Naming: settled on **`sp-fuseki`** under the org (avoids implying Apache
   endorsement). Image tag scheme: two-axis (above).
-- UI tier 2 vs 3: a reskinned YASGUI (~1–2 days) likely covers the need; a
-  bespoke UI is a "useful couple of days?" call against Lance's bandwidth.
+- UI build: a thin CodeMirror web component (tier 2) likely covers the need;
+  skip YASGUI (you'd only fight its wrapper). Web component over React. Tier 3 is
+  a "useful couple of days?" call against Lance's bandwidth.
