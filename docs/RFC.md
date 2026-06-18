@@ -181,6 +181,16 @@ everything else on," not "can we afford weeks."
   as a sole source — but it's still where people search and where a bare
   `docker pull` resolves, so mirror to it for discoverability. Build once, push
   to both in the same Actions job; the dogfood devcontainer pins the GHCR ref.
+- **Rollout — private first, flip when happy.** GHCR package visibility is
+  independent of repo visibility, so start the package **private** (the default
+  on first push from a private repo) and dogfood internally — pulls just need a
+  token with `read:packages` during this phase. When the "are we happy" gate is
+  met (signing + SBOM + scan on, two-axis tags settled, smoke green), flip the
+  package to public in one step — **no rebuild**, the same digests become
+  world-pullable. Flip the *repo* to public separately (you can even keep source
+  private and the image public). Pre-flip checks: the org must permit public
+  package publishing, and the supply-chain bits must be on *before* public —
+  that's when provenance matters.
 - **Tag scheme — two-axis.** Do **not** tag by Jena version alone: the SP layer
   (entrypoint, renderer) has its own fixes that need version space. Use
   `<jena>-<sp-build>` + variant, e.g. `6.2.0-1`, `6.2.0-1-full`, plus moving
