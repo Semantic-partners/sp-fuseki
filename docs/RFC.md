@@ -144,8 +144,8 @@ A UI is not one bet, and the RFC originally over-stated the cost. The tiers:
 | Tier | What | Cost | Status |
 |---|---|---|---|
 | **1. Keep Fuseki's own UI** | `full` variant that doesn't strip the webapp Fuseki ships | ~zero | v0.1/v0.2 |
-| **2. Thin CodeMirror web component** | SPARQL editor + results, built fresh on the CodeMirror config — framework-free, embeddable | ~the old YASGUI-reskin budget, but clean (no wrapper debt) | v0.2 variant |
-| **3. Fuller bespoke UI** | tier 2 + prefixes / history / result viz; possibly a standalone app | more than tier 2; gate is *opportunity cost*, not build difficulty | Bet B, separate |
+| **2. Thin CodeMirror web component** | SPARQL editor + **results-as-data** (raw/tabular), built fresh on the CodeMirror config — framework-free, embeddable | ~the old YASGUI-reskin budget, but clean (no wrapper debt) | v0.2 variant |
+| **3. Fuller bespoke UI** | tier 2 + prefixes / history; possibly a standalone app | more than tier 2; gate is *opportunity cost*, not build difficulty | Bet B, separate |
 
 **Rejected: reskinning YASGUI.** Its only real value is the CodeMirror config;
 the rest is the plugin-hell wrapper you end up fighting. Lift the CodeMirror
@@ -153,6 +153,14 @@ config directly and build a thin shell — skip the wrapper. **Web component, no
 React:** zero framework runtime, portable, CSP-friendly static assets, drop-in
 to the `full` variant or any page, reusable against any endpoint (on-brand "it's
 just data"). React only earns its keep if tier 3 grows into a standalone app.
+
+**No result-viz plugin suite.** YASGUI's other arguable value — canned result
+views (table / geo / chart / pivot) — was worth shipping *pre-LLM*, when bespoke
+viz was expensive. In an LLM world that flips: a good-enough visualisation is a
+half-day for an agent, on demand, per use. So the UI ships query + results-as-
+data and stops there; visualisation is generated against the API, not bundled.
+**APIs are what matter** — the clean, documented endpoint is the asset; canned
+views downstream of it are cheap now. (Held loosely — true *for now*.)
 
 The real papercut is "spin one up, load data, and *poke at it*" — an API-only
 image doesn't solve it; a batteries-included one does. stain stayed popular
