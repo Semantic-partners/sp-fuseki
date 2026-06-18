@@ -1,10 +1,13 @@
-# SP Fuseki — clean, data-driven Apache Jena Fuseki images
+# SP Fuseki — clean, legible Apache Jena Fuseki images
 
-**Status:** draft RFC / starter README. Lift into a new repo
-(`semantic-partners/fuseki` or `…/sp-fuseki`) and iterate.
+**Status:** draft RFC, living in the repo. This revision folds in the
+conclusions of [ASSESSMENT.md](ASSESSMENT.md) — the differentiator is restated
+(legibility, not EDN), the config-format lean is flipped (TTL-first), and the UI
+is reopened as tiers. Where this RFC and the assessment ever drift, the
+assessment is the newer thinking.
 
-A small suite of well-maintained, **config-respecting**, **data-driven** Apache
-Jena Fuseki Docker images — the thing we keep reaching for and not finding.
+A small suite of well-maintained, **config-respecting**, **legible** Apache Jena
+Fuseki Docker images — the thing we keep reaching for and not finding.
 
 ---
 
@@ -18,29 +21,51 @@ There is no maintained, ergonomic Fuseki image. Each option fails differently:
 - **`secoresearch/fuseki`** — *regenerates* its config from env and **ignores a
   mounted `config.ttl`** (we hit this directly setting up the training lab).
 
-So spinning up a triplestore — for a client engagement, a demo, a lab, CI — is a
-papercut every time. This is felt **inside SP** on every project, and the gap is
-real **outside** too (the flagship OSS triplestore genuinely lacks a good Docker
-story). A clean image is low effort, high leverage, and on-brand.
+But the deeper papercut is shared by all three: **to learn how to configure or
+extend them, you reverse-engineer five layers of entrypoint bash.** Which mount
+does what? Which env var triggers what? Why did my mounted config get ignored?
+The extension points are *emergent from the script*, never *stated*. So spinning
+up a triplestore — for a client engagement, a demo, a lab, CI — is a papercut
+every time. This is felt **inside SP** on every project, and the gap is real
+**outside** too (the flagship OSS triplestore genuinely lacks a good Docker
+story). A clean, legible image is low effort, high leverage, and on-brand.
+
+## What we're offering (the thesis)
+
+Not a new config language. Not just "well-operated" (copyable, thin moat). The
+product is **the extension contract, documented and tested** — instead of
+reverse-engineered from bash. Concretely, a user can read:
+
+- what they can mount and exactly what each does (`config.ttl`, `shiro.ini`,
+  data dir);
+- every env var and its effect, including the secret convention;
+- where the entrypoint writes the rendered/effective config, so it can be
+  inspected;
+- recipes for the common moves — add a dataset, switch to TDB2, enable a
+  reasoner, turn on auth, enable the UI.
+
+…and **every documented extension point is exercised by a smoke test**, so the
+docs cannot drift from the entrypoint. That tested legibility is the moat:
+people choose it because they can *understand and trust* it. This is pure SP
+"it's just data" — the config stays RDF; the seams are explicit data, not magic.
 
 ## Goals
 
 - **Config-respecting:** you mount config, we honour it. Never silently
   regenerate or override.
-- **Data-driven:** the whole server described by **one data file** — datasets,
-  reasoners, prefixes, federation, auth — rendered into Fuseki's assembler config
-  at boot. Extension points as *data*, not a plugin SDK. (This is the
-  differentiator, and it's pure SP "it's just data".)
+- **Legible & documented:** the extension points are stated and tested, not
+  emergent from an entrypoint script. A short, readable boot path.
 - **Boring and reliable:** multi-arch, pinned Jena, non-root, healthcheck, slim,
-  reproducible. Auto-bumped, CI-gated, so it stays green without heroics.
+  reproducible. Auto-bumped, CI-gated, signed, so it stays green without heroics.
 - **Dogfooded:** the training-lab devcontainer is adopter #1.
 
 ## Non-goals (v1)
 
-- **The SPARQL UI.** A clean CodeMirror-6 query UI ("YASGUI without the plugin
-  hell") is a *separate product* — weeks of frontend + ongoing maintenance. Do
-  not couple it to the image. Decide it on its own merits later (Bet B). v1 ships
-  the image only; leave a `:ui {:enabled …}` seam in the config for it.
+- **A bespoke from-scratch SPARQL UI.** v1 ships the image; a fully custom query
+  UI is decided separately (Bet B) — not because it's hard, but because it's
+  *ongoing maintenance* and competes for scarce time. This does **not** mean "no
+  UI": keeping Fuseki's own webapp, or bundling/reskinning YASGUI, are cheap
+  image features — see *The UI, as tiers* below.
 - Replacing Fuseki, bundling a custom reasoner, or anything that forks Jena.
 
 ## Design (Bet A — the image)
@@ -48,87 +73,156 @@ story). A clean image is low effort, high leverage, and on-brand.
 - **Base / build:** build from the pinned Apache Jena dist (from
   `archive.apache.org`, permanent — not `dlcdn`, which is latest-only and 404s a
   pinned version once a newer Jena ships). Multi-arch via `buildx`
-  (amd64 + arm64).
-- **Entrypoint = babashka.** Fast startup, and EDN is the natural home for
-  "config as data." The entrypoint reads `fuseki.edn` (or TTL), renders the
-  Fuseki assembler `config.ttl` + `shiro.ini`, then execs `fuseki-server`. Fuseki
-  itself stays the JVM; bb just orchestrates boot + config rendering.
+  (amd64 + arm64). Target Jena **6.x** (the lab toolchain is already on 6.1.0;
+  don't re-freeze a 5.x mismatch).
+- **Entrypoint = babashka.** Not for startup speed (a JVM boots for Fuseki
+  regardless — entrypoint time is noise). For **legibility**: a real language
+  instead of bash to orchestrate boot — parse/validate config, render
+  `shiro.ini`, healthcheck, exec — so the seams are documentable and the boot
+  path is auditable. Bash accretion is exactly what made the incumbents
+  un-documentable. The honest cost: bb is the one pinned, arch-specific,
+  non-Java piece in the build.
 - **Defaults:** non-root user; healthcheck on `/$/ping`; auth `:anon` for
   throwaway, `:basic` opt-in; in-memory or TDB2 per dataset.
-- **Variants (tags):** `minimal` (server only) and later a `lab` variant with
-  extras. Tags track the Jena version + variant; immutable version tags + a
-  moving `latest`.
+- **Variants (tags):** `minimal` (server only) and `full` (keeps Fuseki's own
+  UI). Tags carry the Jena version + variant; immutable version tags + a moving
+  `latest`.
 
-### The config, as data (the heart of it)
+### Config: TTL-first, respected, inspectable
 
-```clojure
-;; fuseki.edn — the whole server described as data.
-;; The bb entrypoint renders Fuseki's assembler config + shiro from this.
-{:server   {:port 3030 :base "/fuseki"}
- :auth     {:mode :anon}                ; :anon | :basic
- :prefixes {:ex  "http://example.org/"
-            :geo "http://geo.org/"}
- :datasets [{:name "training"
-             :storage :mem               ; :mem | :tdb2
-             :endpoints #{:query :update :gsp-rw}}
-            {:name "training-inferred"
-             :storage :mem
-             :reasoner :none             ; :none | :rdfs | :owl-micro | …
-             :endpoints #{:query :gsp-rw}}]
- :federation [{:name "dbpedia" :url "https://dbpedia.org/sparql"}]
- :ui {:enabled false}}                   ; Bet B seam — off in v1
+The config **is Fuseki's own assembler `config.ttl`** — already RDF, already
+"just data," zero new standard to learn. v0.1 does not invent a config language;
+it makes the existing one *legible and respected*. The dogfood config is two
+in-memory datasets and a handful of endpoints — e.g.:
+
+```turtle
+@prefix fuseki: <http://jena.apache.org/fuseki#> .
+@prefix ja:     <http://jena.hpl.hp.com/2005/11/Assembler#> .
+
+:trainingService a fuseki:Service ;
+    fuseki:name "training" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "sparql" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:update ; fuseki:name "update" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data" ] ;
+    fuseki:dataset [ a ja:RDFDataset ; ja:defaultGraph [ a ja:MemoryModel ] ] .
 ```
 
-One file, declarative, diffable, version-controlled. Add a dataset → add a map.
-No bespoke plugin API to learn; the extension points *are* the data.
+**Config resolution (the contract):**
+
+- a `config.ttl` mounted → passed through untouched (pure config-respecting);
+- a `shiro.ini` mounted → passed through untouched;
+- the entrypoint always writes the **effective** config to a known path and logs
+  it, so "what did it actually run" is never a mystery;
+- malformed config fails *loudly* at boot with a clear message — never boots
+  half-configured.
+
+A higher-level **EDN/aero convenience layer** (`fuseki.edn`, the whole server as
+data) is attractive but is **deferred to v0.2** and decided on its own merits —
+it would be the Nth config standard, and the dogfood needs none of it. When/if
+added, it is a *generator over the assembler TTL* with the passthrough above as
+the escape hatch, never a replacement. (See `examples/fuseki.edn` for the sketch.)
+
+### Secrets
+
+`:basic` auth needs credentials, and they never belong in a committed,
+version-controlled config. Best practice churns (encrypted-in-repo / Vault / env
+/ Docker secrets) and **the image must not pick a backend.** Credentials live in
+`shiro.ini`, which the entrypoint renders regardless of config format — so this
+is a *shiro-rendering* concern, format-agnostic. Two mechanisms cover every
+school, because they all deliver to env or a file:
+
+- **env / `*_FILE` convention** read at boot (`FUSEKI_ADMIN_PASSWORD` /
+  `FUSEKI_ADMIN_PASSWORD_FILE`) — covers 12-factor, K8s, vault-agent, Docker
+  secrets;
+- **mount your own `shiro.ini`** (passthrough) — this *is* the diffable-secrets
+  path: SOPS-decrypt at deploy and mount.
+
+### The UI, as tiers
+
+A UI is not one bet. There are three tiers; the RFC originally conflated them
+and over-stated the cost:
+
+| Tier | What | Cost | Status |
+|---|---|---|---|
+| **1. Keep Fuseki's own UI** | `full` variant that doesn't strip the webapp Fuseki ships | ~zero | v0.1/v0.2 |
+| **2. Bundle + reskin YASGUI** | the OSS query UI, skinned, "YASGUI without the plugin hell" | ~1–2 days (Lance has done this pre-Claude) | v0.2 variant |
+| **3. Bespoke CodeMirror-6 UI** | a fully custom UI from scratch | more than tier 2, but the gate is *opportunity cost*, not build difficulty | Bet B, separate |
+
+The real papercut is "spin one up, load data, and *poke at it*" — an API-only
+image doesn't solve it; a batteries-included one does. stain stayed popular
+*because* it's "Fuseki that just runs, with a window into your data." So a UI
+option may be the differentiator, not scope creep. It is just another
+**documented, auth-aware extension point** (anon + exposed update endpoint is a
+footgun — the UI variant defaults auth-aware). Only tier 3 stays a separate
+decision, and even there the question is "is it a *useful* couple of days given
+everything else on," not "can we afford weeks."
 
 ## Distribution & CI
 
-- **Registry:** GHCR — `ghcr.io/semantic-partners/fuseki`. Free for public,
+- **Registry:** GHCR — `ghcr.io/semantic-partners/sp-fuseki`. Free for public,
   trivial to push from Actions. (Mirror to Docker Hub later for discoverability.)
+- **Tag scheme — two-axis.** Do **not** tag by Jena version alone: the SP layer
+  (entrypoint, renderer) has its own fixes that need version space. Use
+  `<jena>-<sp-build>` + variant, e.g. `6.2.0-1`, `6.2.0-1-full`, plus moving
+  `6.2.0` and `latest`. Decide before first publish — retagging after adopters
+  pin is painful.
 - **CI (GitHub Actions):** matrix `buildx` build + push; **smoke test** on each
-  build — boot the image with a sample `fuseki.edn`, POST turtle to
-  `…/data?default`, query it back, assert. (This harness already exists in spirit
-  — it's what verified the course lab.)
-- **Bumps:** Renovate/Dependabot watches Jena releases → opens a bump PR → CI
-  re-tests → merge. Near-zero ongoing effort.
+  build scoped to the *packaging contract* — boot, declared endpoints respond
+  (POST turtle → query back), mounted config honoured (not regenerated),
+  non-root, healthcheck, both arches, and a TDB2 write→restart→read that tests
+  *our volume/permission wiring* (not Jena's durability). Every documented
+  extension point gets a test, so the docs stay honest.
+- **Supply chain:** vulnerability scan (Trivy/Grype), SBOM, and signing
+  (cosign/sigstore + provenance). An unsigned, unscanned "official SP image"
+  undercuts the reputational play.
+- **Bumps:** Renovate watches Jena releases → bump PR → CI re-tests → merge.
+  Near-zero ongoing effort — but don't blind-auto-merge a fresh `.0` the day it
+  drops.
 
 ## Maintenance model & risk
 
 - **The risk:** an *abandoned* "SP official image" is reputationally worse than
-  none. The mitigation is automation — the image only earns the SP name if CI
-  keeps it green without manual heroics. Bet A is built to clear that bar; Bet B
-  (the UI) is not, easily — another reason to keep them apart.
-- **Licensing:** Apache Jena is Apache-2.0; repackaging is fine. Name it clearly
-  as *SP's distribution* — don't imply Apache endorsement. Repo under Apache-2.0
-  or MIT.
+  none. Mitigation is automation — the image only earns the SP name if CI keeps
+  it green without manual heroics. Name an owner and a deprecation/sunset policy
+  so a lapse is graceful, not silent rot.
+- **What we vouch for:** clean, current *packaging* — **not** that Jena is
+  correct. Testing the engine in depth (write durability, SPARQL/reasoner
+  semantics) is Apache's job; chasing the engine's bugs is infinite scope and we
+  could never be confident. We don't ship a *knowingly* affected version (see
+  the Jena CRUD/write-corruption fix landing in 6.2.0), but we don't QA the
+  engine. Overclaiming correctness is the reputational trap, not the cure.
+- **Licensing:** Apache Jena is Apache-2.0; repackaging is fine. Named clearly
+  as *SP's distribution* — no implied Apache endorsement; Jena's own
+  LICENSE/NOTICE ship inside the image. Repo under Apache-2.0 (see `LICENSE`,
+  `NOTICE`).
 
 ## Milestones
 
-- **v0.1** — minimal image, bb entrypoint + `fuseki.edn` rendering, non-root,
-  healthcheck, multi-arch, GHCR publish, CI smoke test, README. (~3–5 focused
-  days.)
-- **v0.2** — `tdb2` storage, `:basic` auth, reasoner options, `lab` variant,
-  docs/examples, Renovate wired.
-- **later** — Bet B (UI) as its own project, slotting into the `:ui` seam.
+- **v0.1** — minimal + `full` (tier-1 UI) images, bb entrypoint honouring mounted
+  `config.ttl`/`shiro.ini` + effective-config dump, env/`*_FILE` secrets,
+  non-root, healthcheck, multi-arch (6.x), GHCR publish, two-axis tags, scan +
+  sign + SBOM, packaging smoke test, README + documented extension points.
+- **v0.2** — `tdb2` storage (+ documented volume/UID contract), `:basic` auth,
+  reasoner options, optional EDN/aero convenience layer (decided on merits),
+  reskinned-YASGUI variant (tier 2), Renovate wired.
+- **later** — Bet B (bespoke UI tier 3) as its own decision, slotting into the
+  same `:ui` seam.
 
 ## First adopter (dogfood)
 
-The training-lab devcontainer currently pins `stain/jena-fuseki:5.1.0`. Once v0.1
-ships, point it at `ghcr.io/semantic-partners/fuseki:5.1.0` — immediate internal
-consumer, and the course demonstrates SP's own tooling.
-
-### lance comments
-we fixed a crud bug on jena that's coming in 6.2.0 
-writes left a corrupted parquet. 
-
+The training-lab devcontainer currently pins `stain/jena-fuseki:5.1.0` for its
+Fuseki service while the rest of its toolchain is on Jena **6.1.0**. Once v0.1
+ships, point it at `ghcr.io/semantic-partners/sp-fuseki:<6.x>` — immediate
+internal consumer, version aligned with the lab, and the course demonstrates
+SP's own tooling. Keep the `stain` pin documented as the fallback until v0.1 has
+cleared a real cohort.
 
 ## Open decisions
 
-- Config format: **EDN** (Clojure-native, great with bb) vs **TTL** (already RDF,
-  closer to Fuseki's own assembler). Lean EDN for the entrypoint; could accept
-  either.
-- Build base: from-dist (full control) vs extend `apache/jena-fuseki` (less to
-  own). Lean from-dist for the config-respecting guarantee.
-- Naming: `sp-fuseki` vs `fuseki` under the org; image tag scheme.
-- Bet B: build greenfield vs embed/improve an existing UI.
+- **Config convenience layer:** ship v0.1 on plain assembler TTL (leaning yes);
+  add EDN/aero in v0.2 only if TTL ergonomics actually hurt. Decided separately
+  from the bb decision.
+- Naming: settled on **`sp-fuseki`** under the org (avoids implying Apache
+  endorsement). Image tag scheme: two-axis (above).
+- UI tier 2 vs 3: a reskinned YASGUI (~1–2 days) likely covers the need; a
+  bespoke UI is a "useful couple of days?" call against Lance's bandwidth.

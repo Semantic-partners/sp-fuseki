@@ -192,19 +192,22 @@ v0.2 *only if* TTL ergonomics actually hurt in practice — by then the passthro
 exists, so EDN is safe to bolt on. Don't commit to EDN before feeling the pain
 it solves.
 
-### 10. The UI non-goal conflates "build" with "bundle" — reopen tiers 1–2
+### 10. The UI non-goal conflates "build" with "bundle" *and* over-states cost
 The RFC excludes the UI as "weeks of frontend + ongoing maintenance, keep it
-separate." That reasoning is **only true for a greenfield UI.** It wrongly kills
-two much cheaper options along with it. There are three tiers, not one bet:
+separate." Two errors: it conflates *build* with *bundle*, and the "weeks"
+figure is inflated. There are three tiers, not one bet:
 
 | Tier | What | Build cost | Maintenance |
 |---|---|---|---|
-| **1. Keep Fuseki's own UI** | A `full`/`lab` variant that doesn't strip the webapp Fuseki already ships | ~zero (don't pass the strip flag) | bumps with Jena; Apache maintains it |
-| **2. Bundle YASGUI** | Serve the mature OSS query UI pointed at the local endpoint | low/med — base paths, CSP, pinning (the "plugin hell") | Renovate-able; static assets, no server surface |
-| **3. Greenfield CodeMirror-6 UI** | The "YASGUI-killer" | weeks | ongoing — the one that *can't* clear the auto-green bar |
+| **1. Keep Fuseki's own UI** | A `full` variant that doesn't strip the webapp Fuseki already ships | ~zero (don't pass the strip flag) | bumps with Jena; Apache maintains it |
+| **2. Bundle + reskin YASGUI** | The OSS query UI, skinned — "YASGUI without the plugin hell" | **~1–2 days** (Lance has done it pre-Claude) | Renovate-able; static assets, no server surface |
+| **3. Bespoke CodeMirror-6 UI** | A fully custom UI from scratch | more than tier 2, **not "weeks" by default** | ongoing — the upkeep, not the build, is the cost |
 
-The RFC's "separate product" argument applies to **tier 3 only**. Tiers 1–2 are
-image features, and tier 1 is nearly free.
+The RFC's "separate product" argument applies to **tier 3 only**, and even there
+the real gate is **opportunity cost** ("is it a *useful* couple of days given
+everything else on?"), not build difficulty. Tiers 1–2 are cheap image
+features; tier 1 is nearly free. Drop the "weeks of frontend" framing — it
+killed cheap, valuable options by association.
 
 This matters for the thesis: stain stayed popular *despite* being abandoned
 because it's "Fuseki that just runs, **with a window into your data.**" The real
