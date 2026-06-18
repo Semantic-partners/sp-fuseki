@@ -1,0 +1,11 @@
+# Build context = repo root; only entrypoint/ is needed by the Dockerfile.
+docs/
+examples/
+test/
+.github/
+*.md
+LICENSE
+NOTICE
+.git/
+.gitignore
+run/

@@ -1,0 +1,16 @@
+# Build artifacts
+/dist/
+/build/
+*.tar.gz
+
+# Rendered config produced by the entrypoint at runtime
+/run/
+config.rendered.ttl
+shiro.rendered.ini
+
+# Local env
+.env
+*.local
+
+# OS / editor
+.DS_Store

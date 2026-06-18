@@ -1,0 +1,17 @@
+sp-fuseki
+Copyright 2026 Semantic Partners Ltd
+
+This product is a redistribution and packaging of Apache Jena Fuseki.
+
+Apache Jena
+Copyright 2011-2026 The Apache Software Foundation
+Licensed under the Apache License, Version 2.0.
+https://jena.apache.org/
+
+This product is NOT endorsed by or affiliated with the Apache Software
+Foundation. "Apache", "Apache Jena", and "Fuseki" are trademarks of the
+Apache Software Foundation. This is Semantic Partners' independent
+distribution of Apache Jena Fuseki.
+
+Apache Jena's own NOTICE and LICENSE files are redistributed unmodified
+inside the published image alongside the Jena binaries.
