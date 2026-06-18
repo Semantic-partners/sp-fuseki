@@ -1,46 +1,113 @@
 # sp-fuseki
 
-Clean, **config-respecting**, **data-driven** Apache Jena Fuseki Docker images.
+Clean, **config-respecting**, **legible** Apache Jena Fuseki Docker images.
 
-The maintained, ergonomic Fuseki image that doesn't exist yet: you mount config,
-we honour it; the whole server is described by one data file (`fuseki.edn`)
-rendered into Fuseki's assembler config at boot.
+You mount config, we honour it. The boot path is a short, readable babashka
+script — not five layers of entrypoint bash — and **every extension point is
+documented below and exercised by the smoke test**. That tested legibility is
+the point: you can understand and trust exactly what the container does.
 
-> Status: **pre-v0.1**. This repo currently holds the design and an example
-> config. No image is published yet. See [docs/RFC.md](docs/RFC.md).
+> **Status: v0.1, buildable + smoke-tested locally, not yet published.** One
+> image (Fuseki's own UI included). UI-stripped `minimal` and the
+> CodeMirror/`full` UI variants are fast-follows — see [docs/RFC.md](docs/RFC.md).
 
 This is *Semantic Partners' distribution* of Apache Jena Fuseki. Apache Jena is
-Apache-2.0; this repackaging does not imply Apache endorsement. See
-[NOTICE](NOTICE).
+Apache-2.0; this repackaging does not imply Apache endorsement. See [NOTICE](NOTICE).
 
-## Why
+## Quickstart
 
-There is no maintained, ergonomic Fuseki image. `stain/jena-fuseki` is
-unmaintained (tags stop at 5.1.0); `apache/jena-fuseki` is bare with an awkward
-config story; `secoresearch/fuseki` regenerates config from env and **ignores a
-mounted `config.ttl`**. Spinning up a triplestore is a papercut every time.
+```bash
+# Throwaway: a single in-memory dataset /ds (query + update + gsp-rw)
+docker run --rm -p 3030:3030 ghcr.io/semantic-partners/sp-fuseki
 
-## Layout
+# Your own datasets: mount an assembler config.ttl — honoured untouched
+docker run --rm -p 3030:3030 \
+  -v "$PWD/examples/config.ttl:/fuseki/config.ttl:ro" \
+  ghcr.io/semantic-partners/sp-fuseki
 
-| Path | Contents |
-|---|---|
-| [docs/RFC.md](docs/RFC.md) | The design RFC — goals, bets, milestones. |
-| [docs/ASSESSMENT.md](docs/ASSESSMENT.md) | Gaps & weakpoints review of the RFC. |
-| [examples/fuseki.edn](examples/fuseki.edn) | The data-driven config example. |
-| `image/` | Dockerfile + build (stub — v0.1). |
-| `entrypoint/` | babashka boot + config renderer (stub — v0.1). |
+# Basic auth, secret from the environment (or a file — see below)
+docker run --rm -p 3030:3030 \
+  -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD=changeme \
+  ghcr.io/semantic-partners/sp-fuseki
+```
 
-## v0.1 scope
+Load and query the default dataset:
 
-Minimal image: babashka entrypoint renders `fuseki.edn` → Fuseki assembler
-config, non-root, healthcheck on `/$/ping`, multi-arch (amd64+arm64), published
-to `ghcr.io/semantic-partners/sp-fuseki`, CI smoke test. Tracking issue: TBD.
+```bash
+curl -X POST -H 'Content-Type: text/turtle' \
+  --data-binary @data.ttl 'http://localhost:3030/ds/data?default'
+curl -G http://localhost:3030/ds/sparql --data-urlencode 'query=SELECT * { ?s ?p ?o }'
+```
 
-## First adopter
+## Extension points (the contract)
 
-The `training-data` devcontainer (Apache Jena 6.1.0 toolchain) currently pins
-`stain/jena-fuseki:5.1.0` for its Fuseki service. v0.1 repoints it here —
-aligning the Fuseki version with the rest of the lab toolchain in the process.
+Everything the image does is driven by these — nothing is hidden in a script.
+
+### Mounts
+
+| Mount | Default path | Behaviour |
+|---|---|---|
+| Assembler config | `/fuseki/config.ttl` | If present, **honoured untouched**. If absent, a minimal in-memory dataset is generated. Never merged or silently regenerated. |
+| Shiro auth config | `/fuseki/shiro.ini` | If present, **honoured untouched** (your escape hatch for any auth setup, incl. SOPS-decrypted secrets). If absent, generated from `FUSEKI_AUTH`. |
+
+The **effective** config and shiro that actually run are always written to
+`$FUSEKI_BASE` (`config.effective.ttl`, `shiro.ini`) and their paths logged at
+boot — so "what did it actually run" is never a mystery.
+
+### Environment
+
+| Var | Default | Purpose |
+|---|---|---|
+| `FUSEKI_BASE` | `/fuseki/run` | Runtime/data dir (must be writable by uid 1000). |
+| `FUSEKI_CONFIG` | `/fuseki/config.ttl` | Where to look for a mounted assembler config. |
+| `FUSEKI_SHIRO` | `/fuseki/shiro.ini` | Where to look for a mounted shiro.ini. |
+| `FUSEKI_PORT` | `3030` | Listen port. |
+| `FUSEKI_DATASET` | `ds` | Name of the generated default dataset (when no config mounted). |
+| `FUSEKI_AUTH` | `anon` | `anon` (throwaway/lab) or `basic` (all endpoints require login). |
+| `FUSEKI_ADMIN_USER` | `admin` | Basic-auth username. |
+| `FUSEKI_ADMIN_PASSWORD` | — | Basic-auth secret, inline. |
+| `FUSEKI_ADMIN_PASSWORD_FILE` | — | Basic-auth secret, read from a file (Docker/K8s secret, vault-agent sink, SOPS output). Preferred over the inline form. |
+
+**Secrets are backend-agnostic by design.** The image never bakes in a secrets
+manager: a credential arrives via env, a `*_FILE` path, or your own mounted
+`shiro.ini`. Whatever delivers it (Vault, SOPS, Docker secrets) just needs to
+land it in one of those. Don't commit a plaintext password anywhere.
+
+### Adding a dataset
+
+It's Fuseki's own assembler vocabulary — add a `fuseki:Service`. See
+[examples/config.ttl](examples/config.ttl). No bespoke API to learn.
+
+## Defaults
+
+Non-root (uid 1000) · healthcheck on `/$/ping` · in-memory datasets (TDB2 is
+v0.2) · multi-arch amd64+arm64 · pinned Jena from `archive.apache.org`.
+
+## Build & test locally
+
+```bash
+docker build -f image/Dockerfile -t sp-fuseki:dev .
+IMAGE=sp-fuseki:dev bash test/smoke.sh
+```
+
+The smoke test asserts the **packaging contract** — non-root, boot, `/$/ping`,
+a POST→query round-trip, and that a mounted config is honoured (not merged). It
+does **not** test Jena's correctness; that's Apache's job (see
+[docs/ASSESSMENT.md](docs/ASSESSMENT.md) §6).
+
+## Publishing
+
+CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds multi-arch,
+smoke-tests, pushes to GHCR with two-axis tags (`<jena>-<sp-build>`, `<jena>`,
+`latest`), generates an SBOM, scans (Trivy), and signs (cosign keyless).
+Renovate watches Jena via Maven Central and opens bump PRs. **Private first**;
+flip the package public when the are-we-happy gate is met — see the RFC's
+Distribution & CI section.
+
+## Docs
+
+- [docs/RFC.md](docs/RFC.md) — design, bets, milestones.
+- [docs/ASSESSMENT.md](docs/ASSESSMENT.md) — gaps/weakpoints review.
 
 ## License
 

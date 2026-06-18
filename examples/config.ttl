@@ -1,0 +1,25 @@
+# sp-fuseki example assembler config — the v0.1 substrate (config-respecting).
+# Mount this at FUSEKI_CONFIG (default /fuseki/config.ttl) and sp-fuseki honours
+# it untouched. This mirrors the training-lab's two in-memory datasets:
+#   /training           — asserted graph
+#   /training-inferred  — asserted + materialised closure (loaded offline)
+#
+# Add a dataset = add a fuseki:Service. No bespoke API; it's Fuseki's own
+# assembler vocabulary, documented in the README's extension-points table.
+
+@prefix :        <#> .
+@prefix fuseki:  <http://jena.apache.org/fuseki#> .
+@prefix ja:      <http://jena.hpl.hp.com/2005/11/Assembler#> .
+
+:trainingService a fuseki:Service ;
+    fuseki:name "training" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "sparql" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:update ; fuseki:name "update" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data" ] ;
+    fuseki:dataset [ a ja:RDFDataset ; ja:defaultGraph [ a ja:MemoryModel ] ] .
+
+:trainingInferredService a fuseki:Service ;
+    fuseki:name "training-inferred" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name "sparql" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data" ] ;
+    fuseki:dataset [ a ja:RDFDataset ; ja:defaultGraph [ a ja:MemoryModel ] ] .

@@ -1,0 +1,100 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Daily fallback poll — Renovate is the primary new-Jena signal; this catches
+    # a missed bump and re-runs the smoke test against the current pin.
+    - cron: "17 6 * * *"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sp-fuseki
+
+jobs:
+  # Gate: build amd64, load locally, assert the packaging contract.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (amd64, load)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: image/Dockerfile
+          load: true
+          tags: sp-fuseki:ci
+          platforms: linux/amd64
+      - name: Packaging smoke test
+        run: IMAGE=sp-fuseki:ci bash test/smoke.sh
+
+  # Publish: multi-arch build + push, SBOM, scan, sign. Skips PRs.
+  publish:
+    needs: smoke
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign keyless
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive two-axis tags (jena-version + sp-build)
+        id: ver
+        run: |
+          JENA=$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)
+          echo "jena=$JENA" >> "$GITHUB_OUTPUT"
+          echo "sp_build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata / tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.jena }}-${{ steps.ver.outputs.sp_build }}
+            type=raw,value=${{ steps.ver.outputs.jena }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build + push (multi-arch)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: image/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: Trivy scan (report; non-blocking until we triage a baseline)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+
+      - name: Sign image (cosign keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
