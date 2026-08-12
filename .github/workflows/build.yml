@@ -27,9 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTRA_JENA: 6.1.0
+      SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
+      arches: ${{ steps.p.outputs.arches }}
       image: ${{ steps.p.outputs.image }}
     steps:
     - uses: actions/checkout@v4
@@ -42,9 +44,19 @@ jobs:
         # shellcheck disable=SC2086
         MATRIX="$(printf '%s\n' $EXTRA_JENA "$DEF" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)"
         OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+        # A self-hosted runner executes whatever the workflow says, on a real
+        # machine with persistent state and LAN access. Fork PRs get hosted
+        # amd64 only — still tested, just not on our hardware.
+        if [ "$SAME_REPO" = "true" ]; then
+          ARCHES='["amd64", "arm64"]'
+        else
+          ARCHES='["amd64"]'
+          echo "fork PR: omitting the self-hosted arm64 leg"
+        fi
         {
           echo "default=$DEF"
           echo "matrix=$MATRIX"
+          echo "arches=$ARCHES"
           # GHCR requires a lowercase image name.
           echo "image=${REGISTRY}/${OWNER}/sp-fuseki"
         } >> "$GITHUB_OUTPUT"
@@ -56,9 +68,7 @@ jobs:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
-        arch:
-        - amd64
-        - arm64
+        arch: ${{ fromJSON(needs.plan.outputs.arches) }}
     steps:
     - uses: actions/checkout@v4
     - uses: docker/setup-buildx-action@v3
@@ -90,9 +100,7 @@ jobs:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
-        arch:
-        - amd64
-        - arm64
+        arch: ${{ fromJSON(needs.plan.outputs.arches) }}
     permissions:
       contents: read
       packages: write
@@ -145,6 +153,11 @@ jobs:
         path: /tmp/digests/*
         retention-days: 1
         if-no-files-found: error
+    - name: Remove the credential file
+      if: always()
+      run: |
+        set -euo pipefail
+        [ -n "${DOCKER_CONFIG:-}" ] && rm -f "$DOCKER_CONFIG/config.json" || true
   merge:
     needs:
     - plan
@@ -166,8 +179,24 @@ jobs:
         merge-multiple: true
         path: /tmp/digests
     - uses: docker/setup-buildx-action@v3
-    - uses: sigstore/cosign-installer@v3
+    - name: Install cosign 2.5.2
       if: github.event_name != 'pull_request'
+      env:
+        COSIGN_VERSION: 2.5.2
+      run: |
+        set -euo pipefail
+        base="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
+        curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20 \
+          "$base/cosign-linux-amd64" -o "$RUNNER_TEMP/cosign"
+        curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20 \
+          "$base/cosign_checksums.txt" -o "$RUNNER_TEMP/cosign_checksums.txt"
+        # A signing tool is the last thing that should be a partial download.
+        sum="$(grep -E ' cosign-linux-amd64$' "$RUNNER_TEMP/cosign_checksums.txt" | cut -d' ' -f1)"
+        echo "$sum  $RUNNER_TEMP/cosign" | sha256sum -c -
+        chmod +x "$RUNNER_TEMP/cosign"
+        mkdir -p "$RUNNER_TEMP/bin"
+        mv "$RUNNER_TEMP/cosign" "$RUNNER_TEMP/bin/cosign"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
     - uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
