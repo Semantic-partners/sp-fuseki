@@ -74,6 +74,10 @@ jobs:
 
           # printf, not a heredoc: an unindented heredoc terminator would end the
           # YAML block scalar this script lives in.
+          #
+          # Single quotes are intentional throughout: the bodies contain literal
+          # markdown backticks and $ that must NOT be expanded by the shell.
+          # shellcheck disable=SC2016
           {
             printf 'Apache Jena Fuseki **%s** is on archive.apache.org. Our default pin is **%s**.\n\n' "$UPSTREAM" "$PINNED"
             printf 'To pick it up:\n\n'
