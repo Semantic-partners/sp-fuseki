@@ -2,6 +2,20 @@
 
 Clean, **config-respecting**, **legible** Apache Jena Fuseki Docker images.
 
+[![build](https://github.com/Semantic-partners/sp-fuseki/workflows/build/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/build.yml)
+[![lint](https://github.com/Semantic-partners/sp-fuseki/workflows/lint/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/lint.yml)
+[![upstream-check](https://github.com/Semantic-partners/sp-fuseki/workflows/upstream-check/badge.svg)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/upstream-check.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-informational)
+![signed](https://img.shields.io/badge/images-cosign%20signed-informational)
+
+**`build` green means the tests passed** — unit tests over the config renderer and
+over the CI definition itself, plus packaging assertions against real containers, on
+**both** architectures natively. There's no separate tests badge because there's no
+separate tests workflow: tests gate the build, so a green build *is* the claim, and
+it can't drift from a count written in prose.
+`upstream-check` runs weekly and opens an issue if Apache ships a newer Fuseki.
+
 You mount config, we honour it. The boot path is a short, readable babashka
 script — not five layers of entrypoint bash — and **every extension point is
 documented below and exercised by the smoke test**. That tested legibility is
@@ -224,6 +238,50 @@ Non-root (uid 1000) · healthcheck on `/$/ping` · Fuseki's UI on · mutating ad
 API fenced · in-memory datasets unless your config says TDB2 · multi-arch
 amd64+arm64 · pinned Jena from `archive.apache.org`.
 
+## Vulnerability posture — yes, we know about the CVEs
+
+Scan this image and you will find HIGH and CRITICAL findings. We would rather tell
+you than have you discover them and wonder what else we haven't mentioned.
+
+As of **2026-08-12**, on the Jena 6.2.0 image:
+
+| | |
+|---|---|
+| HIGH / CRITICAL | **35** (30 HIGH, 5 CRITICAL) |
+| **With a fix available** | **0** |
+| Status breakdown | 21 `affected`, 13 `fix_deferred`, 1 `will_not_fix` |
+| Where they are | Debian 12 base packages — `perl`, `util-linux`, `zlib1g` |
+| In Fuseki, Jena or the JRE | **none** |
+
+Check it yourself rather than believing the table:
+
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy \
+  image --severity HIGH,CRITICAL ghcr.io/semantic-partners/sp-fuseki:6.2.0
+```
+
+**Why we don't fail the build on these.** Every one of them is unpatched *upstream*
+— Debian has either deferred or declined a fix, so there is no version to move to.
+A build that blocks on them is red on day one and every day after, with nothing a
+maintainer could do about it. That is not a backlog, and a permanently red pipeline
+teaches everyone to ignore it.
+
+**What we do fail on: any finding that has a fix available.** Today that count is
+zero, so the gate is green — and it goes red the day a patch exists that we haven't
+picked up. That is the signal worth having, and it's the one thing in this area a
+build can honestly assert.
+
+The full report, unfixable findings included, is kept as a build artefact on every
+publish, and goes to GitHub code scanning once this repo is public.
+
+**The honest trade.** Those CVEs are in base packages this image never executes —
+we need `ca-certificates` and `curl` for TLS and the healthcheck, not `perl` or
+`libblkid`. A smaller base (distroless, or a JRE-only image) would cut most of the
+surface. We haven't done it: it changes the debugging story inside the container,
+and every one of these findings is currently unreachable in normal operation. If
+your risk model says otherwise, that's a legitimate reason to build your own from
+[image/Dockerfile](image/Dockerfile) — it's a short file, which is the point.
+
 ## Build & test locally
 
 ```bash
@@ -274,9 +332,20 @@ test Jena's correctness; that's Apache's job (see
 CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds a **matrix
 of Jena versions** multi-arch, smoke-tests each, pushes to GHCR with two-axis tags
 (`<jena>-<sp-build>`, `<jena>`, and `latest` on the default leg only), generates an
-SBOM, scans (Trivy), and signs (cosign keyless). The default leg is whatever
-`image/Dockerfile` pins; older versions we still publish are listed in
-`EXTRA_JENA`. There is no cron — builds run on bumps. Renovate watches Jena via
+SBOM, scans (Trivy — see *Vulnerability posture* above for what that blocks and
+what it merely reports), and signs (cosign keyless). The default leg is whatever
+`image/Dockerfile` pins; additional older versions can be published alongside it by
+listing them in `EXTRA_JENA`, which is currently **empty**.
+
+We published 6.1.0 briefly and stopped: the scan gate found two HIGH findings with
+fixes available in that image's bundled jars — `shiro-core` 2.1.0
+([CVE-2026-49268](https://avd.aquasec.com/nvd/cve-2026-49268)) and `jetty-security`
+12.1.8 ([CVE-2026-10050](https://avd.aquasec.com/nvd/cve-2026-10050)), both patched
+in what Jena 6.2.0 ships. An older leg is only worth publishing if it can be kept
+patched, and that one can't be without Apache re-releasing it. So there is one
+supported Jena at a time, and it is the current one.
+
+There is no cron — builds run on bumps. Renovate watches Jena via
 Maven Central, and [upstream-check.yml](.github/workflows/upstream-check.yml) runs
 weekly against `archive.apache.org` and opens an issue if a newer Fuseki exists.
 **Private first**;
