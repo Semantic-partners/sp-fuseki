@@ -2,6 +2,20 @@
 
 Clean, **config-respecting**, **legible** Apache Jena Fuseki Docker images.
 
+[![build](https://github.com/Semantic-partners/sp-fuseki/workflows/build/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/build.yml)
+[![lint](https://github.com/Semantic-partners/sp-fuseki/workflows/lint/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/lint.yml)
+[![upstream-check](https://github.com/Semantic-partners/sp-fuseki/workflows/upstream-check/badge.svg)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/upstream-check.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-informational)
+![signed](https://img.shields.io/badge/images-cosign%20signed-informational)
+
+**`build` green means the tests passed** — unit tests over the config renderer and
+over the CI definition itself, plus packaging assertions against real containers, on
+**both** architectures natively. There's no separate tests badge because there's no
+separate tests workflow: tests gate the build, so a green build *is* the claim, and
+it can't drift from a count written in prose.
+`upstream-check` runs weekly and opens an issue if Apache ships a newer Fuseki.
+
 You mount config, we honour it. The boot path is a short, readable babashka
 script — not five layers of entrypoint bash — and **every extension point is
 documented below and exercised by the smoke test**. That tested legibility is

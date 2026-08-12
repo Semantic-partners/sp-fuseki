@@ -362,8 +362,12 @@
              ;; Debian 12 base packages; the Java scanner finds nothing. So blocking
              ;; on HIGH/CRITICAL would be red on every build forever with nothing
              ;; actionable — a wall, not a backlog.
+             ;; Runs on PRs too, unlike the report below. A gate that only fires
+             ;; after merge tells you about a fixable CVE once it's already on main;
+             ;; on a PR it tells the contributor. ~20s, and the DB comes from a
+             ;; registry rather than GitHub releases, so it's a different failure
+             ;; domain from the download flakiness that plagued this pipeline.
              (m :name "Trivy — fail only on vulnerabilities that HAVE a fix"
-                :if not-pr
                 :uses "aquasecurity/trivy-action@v0.36.0"
                 :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")
                          :format "table"

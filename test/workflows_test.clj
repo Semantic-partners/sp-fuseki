@@ -70,11 +70,15 @@
       (testing "and still runs on push"
         (is (str/includes? cond- "github.event_name != 'pull_request'"))))))
 
-(deftest scanning-and-signing-stay-off-prs
-  (doseq [needle ["trivy" "cosign sign"]]
+(deftest publishing-side-effects-stay-off-prs
+  ;; The REPORT and the SIGNATURE are side effects of publishing a release, so
+  ;; they stay off PRs. The scan GATE is not a side effect — it's feedback, and it
+  ;; deliberately runs on PRs (see trivy-blocks-only-on-fixable-findings).
+  (doseq [[needle desc] [["full report" "the SARIF report"]
+                         ["cosign sign" "signing"]]]
     (let [s (step-named :merge needle)]
       (is (some? s) (str "no step matching " needle))
-      (is (= w/not-pr (:if s)) (str needle " should be gated to non-PR events")))))
+      (is (str/includes? (:if s) w/not-pr) (str desc " should be gated to non-PR events")))))
 
 (deftest fork-prs-never-reach-the-self-hosted-runner
   ;; The one that matters if this repo goes public. A self-hosted runner executes
@@ -137,7 +141,9 @@
     (is (true? (get-in gate [:with :ignore-unfixed])) "unfixable findings must not block")
     (is (= "1" (get-in gate [:with :exit-code])) "fixable findings MUST block")
     (is (nil? (:continue-on-error gate))
-        "a gate with continue-on-error is decoration, which is what this replaced")))
+        "a gate with continue-on-error is decoration, which is what this replaced")
+    (testing "and it runs on PRs — telling a contributor beats telling main"
+      (is (nil? (:if gate))))))
 
 (deftest the-full-report-never-blocks-and-is-kept
   (let [report (step-named :merge "full report")
