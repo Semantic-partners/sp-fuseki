@@ -64,6 +64,11 @@ jobs:
           platforms: linux/amd64
           build-args: |
             JENA_VERSION=${{ matrix.jena }}
+          # Shared with the publish job below, so the JRE/Fuseki/babashka
+          # downloads happen once per leg instead of once per job. Fewer requests
+          # is the real fix for the GitHub 503s that kept failing publish.
+          cache-from: type=gha,scope=jena-${{ matrix.jena }}
+          cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}
       # Renderer contract, run with the bb that actually ships in the image — no
       # third-party setup action, and no chance of testing a different bb version
       # than the entrypoint uses. Before the integration tests: it's sub-second
@@ -132,6 +137,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             JENA_VERSION=${{ matrix.jena }}
+          # Reuses the smoke job's amd64 layers for this leg; only arm64 is new work.
+          cache-from: type=gha,scope=jena-${{ matrix.jena }}
+          cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}
           provenance: true
           sbom: true
 
