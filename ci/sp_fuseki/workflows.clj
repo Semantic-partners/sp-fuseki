@@ -71,6 +71,12 @@
 
 (def not-pr "github.event_name != 'pull_request'")
 
+;; Pinned here rather than in the generated YAML: a Renovate PR editing
+;; build.yml directly would be reverted by the next regeneration AND fail the
+;; drift check. Generated files must never be a bot's target — the source is.
+;; renovate: datasource=github-releases depName=sigstore/cosign extractVersion=^v(?<version>.*)$
+(def cosign-version "2.5.2")
+
 (def same-repo-or-push
   "Publish and merge run on same-repo PRs so the whole path is proven BEFORE
   merge — three merge-to-test cycles earned this. Fork PRs get no packages:write
@@ -78,6 +84,9 @@
   (str not-pr " || github.event.pull_request.head.repo.full_name == github.repository"))
 
 (def jena-matrix "${{ fromJSON(needs.plan.outputs.matrix) }}")
+;; Not a literal list: plan drops arm64 for fork PRs so the job is never
+;; scheduled onto the self-hosted machine.
+(def arches-matrix "${{ fromJSON(needs.plan.outputs.arches) }}")
 (def image "${{ needs.plan.outputs.image }}")
 
 (defn cache-scope [] "type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}")
@@ -91,9 +100,17 @@
      ;; EXTRA_JENA lists older versions still published beside the Dockerfile's
      ;; pin. The pin is Renovate-managed and is the leg that gets `latest`, so
      ;; there is one source of truth for "what is current".
-     :env (m :EXTRA_JENA "6.1.0")
+     ;;
+     ;; SAME_REPO decides whether the self-hosted arm64 leg exists at all. It's
+     ;; computed HERE, on a hosted runner, because a job-level `if:` cannot see
+     ;; the matrix context — and even if it could, `runs-on` is resolved before
+     ;; steps run, so a skipped-step job would still be scheduled onto the Mac.
+     ;; Removing the arch from the list is the only way the job never exists.
+     :env (m :EXTRA_JENA "6.1.0"
+             :SAME_REPO (str "${{ " same-repo-or-push " }}"))
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
+                 :arches "${{ steps.p.outputs.arches }}"
                  :image "${{ steps.p.outputs.image }}")
      :steps [(m :uses "actions/checkout@v4")
              (m :id "p"
@@ -104,9 +121,19 @@
                           "# shellcheck disable=SC2086\n"
                           "MATRIX=\"$(printf '%s\\n' $EXTRA_JENA \"$DEF\" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)\"\n"
                           "OWNER=\"$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')\"\n"
+                          "# A self-hosted runner executes whatever the workflow says, on a real\n"
+                          "# machine with persistent state and LAN access. Fork PRs get hosted\n"
+                          "# amd64 only — still tested, just not on our hardware.\n"
+                          "if [ \"$SAME_REPO\" = \"true\" ]; then\n"
+                          "  ARCHES='[\"amd64\", \"arm64\"]'\n"
+                          "else\n"
+                          "  ARCHES='[\"amd64\"]'\n"
+                          "  echo \"fork PR: omitting the self-hosted arm64 leg\"\n"
+                          "fi\n"
                           "{\n"
                           "  echo \"default=$DEF\"\n"
                           "  echo \"matrix=$MATRIX\"\n"
+                          "  echo \"arches=$ARCHES\"\n"
                           "  # GHCR requires a lowercase image name.\n"
                           "  echo \"image=${REGISTRY}/${OWNER}/sp-fuseki\"\n"
                           "} >> \"$GITHUB_OUTPUT\"\n"
@@ -115,10 +142,17 @@
 (def test-job
   ;; Each arch built and tested by a runner of that arch. Before this, arm64 was
   ;; only ever an emulated leg of a publish — never tested at all.
+  ;;
+  ;; SECURITY: the arm64 leg is gated to same-repo events. A self-hosted runner
+  ;; executes whatever the workflow says, on a real machine with persistent state
+  ;; and LAN access — so a fork PR must never land on it. amd64 still runs for
+  ;; forks, on disposable hosted VMs, so outside contributions are still tested.
+  ;; This matters most if the repo goes public; GitHub's own guidance is not to
+  ;; use self-hosted runners with public repos at all.
   (m :needs "plan"
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
-                  :matrix (m :jena jena-matrix :arch ["amd64" "arm64"]))
+                  :matrix (m :jena jena-matrix :arch arches-matrix))
      :steps [(m :uses "actions/checkout@v4")
              (m :uses "docker/setup-buildx-action@v3")
              (m :name "Build (native, load)"
@@ -192,7 +226,7 @@
      :if same-repo-or-push
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
-                  :matrix (m :jena jena-matrix :arch ["amd64" "arm64"]))
+                  :matrix (m :jena jena-matrix :arch arches-matrix))
      :permissions (m :contents "read" :packages "write")
      :steps [(m :uses "actions/checkout@v4")
              isolate-docker-step
@@ -219,7 +253,14 @@
                 :with (m :name "digest-${{ matrix.jena }}-${{ matrix.arch }}"
                          :path "/tmp/digests/*"
                          :retention-days 1
-                         :if-no-files-found "error"))]))
+                         :if-no-files-found "error"))
+             ;; RUNNER_TEMP is cleaned between jobs, but a self-hosted machine is
+             ;; not a fresh VM and a cancelled job may not get that far. The token
+             ;; expires with the job; the file shouldn't outlive it either.
+             (m :name "Remove the credential file"
+                :if "always()"
+                :run (str "set -euo pipefail\n"
+                          "[ -n \"${DOCKER_CONFIG:-}\" ] && rm -f \"$DOCKER_CONFIG/config.json\" || true\n"))]))
 
 (def ^:private tag-lines
   ;; Release tags only off-PR; `latest` only for the default leg on main; a
@@ -247,12 +288,31 @@
                          :merge-multiple true
                          :path "/tmp/digests"))
              (m :uses "docker/setup-buildx-action@v3")
-             ;; Gated identically to the signing step below. Installing cosign on a
-             ;; PR downloaded a release we never use, and that download failed a
-             ;; merge leg with exit 56 — an avoidable network call is an avoidable
-             ;; flake. workflows-test asserts the two gates stay equal.
-             (m :uses "sigstore/cosign-installer@v3"
-                :if not-pr)
+             ;; Not sigstore/cosign-installer. It single-shots a GitHub release
+             ;; download, which failed this pipeline twice — exit 56 (connection
+             ;; reset) and exit 22 (HTTP error) — and GitHub release fetches have
+             ;; been the flakiest dependency here by a distance. Same patient
+             ;; backoff and checksum verification the Dockerfile uses for babashka,
+             ;; and one less third-party action in the signing path.
+             ;;
+             ;; Gated identically to the signing step: installing a tool we don't
+             ;; use is an avoidable network call, and an avoidable flake.
+             (m :name (str "Install cosign " cosign-version)
+                :if not-pr
+                :env (m :COSIGN_VERSION cosign-version)
+                :run (str "set -euo pipefail\n"
+                          "base=\"https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}\"\n"
+                          "curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20 \\\n"
+                          "  \"$base/cosign-linux-amd64\" -o \"$RUNNER_TEMP/cosign\"\n"
+                          "curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20 \\\n"
+                          "  \"$base/cosign_checksums.txt\" -o \"$RUNNER_TEMP/cosign_checksums.txt\"\n"
+                          "# A signing tool is the last thing that should be a partial download.\n"
+                          "sum=\"$(grep -E ' cosign-linux-amd64$' \"$RUNNER_TEMP/cosign_checksums.txt\" | cut -d' ' -f1)\"\n"
+                          "echo \"$sum  $RUNNER_TEMP/cosign\" | sha256sum -c -\n"
+                          "chmod +x \"$RUNNER_TEMP/cosign\"\n"
+                          "mkdir -p \"$RUNNER_TEMP/bin\"\n"
+                          "mv \"$RUNNER_TEMP/cosign\" \"$RUNNER_TEMP/bin/cosign\"\n"
+                          "echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"))
              (m :uses "docker/login-action@v3"
                 :with (m :registry "${{ env.REGISTRY }}"
                          :username "${{ github.actor }}"
@@ -334,11 +394,31 @@
   [wf]
   (let [jobs (:jobs wf)]
     (doseq [[jid job] jobs]
-      ;; 1. Context availability: job-level env can't see runner/steps/env/job.
-      (doseq [e (expressions (:env job))]
-        (when-let [ctx (re-find #"\b(runner|steps|env|job)\." e)]
-          (bad "job " jid ": job-level env uses the '" (first (str/split (first ctx) #"\."))
-               "' context, which isn't available there — this invalidates the whole workflow file")))
+      ;; 1. Context availability, per GitHub's table. Getting this wrong doesn't
+      ;;    fail the job — it invalidates the WHOLE FILE, producing a run with zero
+      ;;    jobs and "This run likely failed because of a workflow file issue".
+      ;;
+      ;;    Both entries below are scars: `runner` in job-level env cost a broken
+      ;;    file, and `matrix` in a job-level `if` was my attempt to gate one
+      ;;    matrix leg — impossible, and actionlint caught it before this did.
+      ;;    (It wouldn't have worked regardless: `runs-on` resolves before steps,
+      ;;    so the job would still be scheduled onto the runner.)
+      (doseq [[k allowed] {:env #{"github" "needs" "strategy" "matrix" "secrets" "inputs" "vars"}
+                           :if  #{"github" "needs" "inputs" "vars"}}]
+        ;; `if:` is ALREADY an expression — GitHub evaluates it with or without
+        ;; ${{ }}. Scanning only for ${{ }} (as the first version did) silently
+        ;; skipped every bare `if`, which is how a test caught this validator
+        ;; being wrong about the very rule it was added for.
+        (doseq [e (if (= k :if)
+                    (when-let [v (get job k)] [v])
+                    (expressions (get job k)))
+                [_ ctx] (re-seq #"\b([a-z]+)\." e)
+                :when (and (not (allowed ctx))
+                           (#{"runner" "steps" "env" "job" "matrix" "strategy" "secrets"} ctx))]
+          (bad "job " jid ": job-level " k " uses the '" ctx
+               "' context, which isn't available there (allowed: "
+               (str/join ", " (sort allowed))
+               ") — this invalidates the whole workflow file")))
       ;; 2. needs must exist, or the job silently never runs.
       (doseq [n (let [ns- (:needs job)] (if (string? ns-) [ns-] ns-))]
         (when-not (contains? jobs (keyword n))

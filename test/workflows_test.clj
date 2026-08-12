@@ -76,10 +76,54 @@
       (is (some? s) (str "no step matching " needle))
       (is (= w/not-pr (:if s)) (str needle " should be gated to non-PR events")))))
 
-(deftest cosign-installer-shares-the-signing-gate
+(deftest fork-prs-never-reach-the-self-hosted-runner
+  ;; The one that matters if this repo goes public. A self-hosted runner executes
+  ;; whatever the workflow says, on a real machine with persistent state and LAN
+  ;; access, so a fork PR must never land there. amd64 still runs for forks on
+  ;; disposable hosted VMs, so outside contributions are still tested.
+  ;;
+  ;; Enforced by OMITTING the arch, not by a job-level `if`: `runs-on` resolves
+  ;; before steps run, so a job whose steps are all skipped is still scheduled
+  ;; onto the machine. (And job-level `if` can't see `matrix` anyway.)
+  (testing "the arch list is computed, not hardcoded"
+    (doseq [id [:test :publish]]
+      (is (= w/arches-matrix (get-in (job id) [:strategy :matrix :arch]))
+          (str id " must take its arch list from plan"))))
+  (testing "plan decides it from whether the event is same-repo"
+    (is (str/includes? (get-in (job :plan) [:env :SAME_REPO]) "head.repo.full_name == github.repository"))
+    (let [script (:run (second (:steps (job :plan))))]
+      (is (str/includes? script "SAME_REPO"))
+      (is (str/includes? script "[\"amd64\"]") "fork PRs get amd64 only")
+      (is (str/includes? script "arches=") "and it must be exported for the matrices")))
+  (testing "publish never runs for a fork at all"
+    (is (str/includes? (:if (job :publish)) "head.repo.full_name == github.repository"))))
+
+(deftest cosign-is-installed-by-us-with-verification
+  ;; sigstore/cosign-installer single-shots a GitHub release download, which
+  ;; failed this pipeline twice (exit 56, exit 22).
+  (let [uses (->> (:steps (job :merge)) (keep :uses) (filter #(str/includes? % "cosign")))
+        step (step-named :merge "Install cosign")]
+    (is (empty? uses) "no third-party cosign installer action")
+    (is (some? step))
+    (testing "patient retries, because release downloads are the flakiest thing here"
+      (is (str/includes? (:run step) "--retry-all-errors"))
+      (is (str/includes? (:run step) "--retry-max-time")))
+    (testing "checksum-verified — a signing tool must not be a partial download"
+      (is (str/includes? (:run step) "sha256sum -c")))
+    (testing "version pinned in the SOURCE, so Renovate can't edit generated YAML"
+      (is (str/includes? (:run step) "${COSIGN_VERSION}"))
+      (is (= w/cosign-version (get-in step [:env :COSIGN_VERSION]))))))
+
+(deftest the-credential-file-is-removed-even-on-failure
+  (let [step (step-named :publish "Remove the credential file")]
+    (is (some? step))
+    (is (= "always()" (:if step))
+        "a cancelled job on a shared machine shouldn't leave a token on disk")))
+
+(deftest installing-cosign-shares-the-signing-gate
   ;; One gated and the other not is the bug: we installed cosign on every PR,
   ;; never signed there, and a failed cosign download took out a merge leg.
-  (let [installer (step-named :merge "cosign-installer")
+  (let [installer (step-named :merge "Install cosign")
         signer    (step-named :merge "cosign sign")]
     (is (some? installer))
     (is (= (:if signer) (:if installer))
@@ -170,6 +214,16 @@
                                   :strategy {:matrix {:a ["b"]}}}}})]
     (is (str/includes? msg "aren't a known runner"))
     (is (str/includes? msg "hangs"))))
+
+(deftest rejects-matrix-in-a-job-level-if
+  ;; My attempt to gate one matrix leg. Job-level `if` sees only github/needs/
+  ;; inputs/vars — actionlint caught this before the generator did, so now the
+  ;; generator does too.
+  (let [msg (refuses? {:jobs {:x {:runs-on w/hosted
+                                  :if "matrix.arch != 'arm64'"
+                                  :strategy {:matrix {:arch ["amd64"]}}}}})]
+    (is (str/includes? msg "matrix"))
+    (is (str/includes? msg "isn't available there"))))
 
 (deftest rejects-a-needs-that-points-nowhere
   (is (str/includes? (refuses? {:jobs {:x {:runs-on w/hosted :needs ["ghost"]}}})
