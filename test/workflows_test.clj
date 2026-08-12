@@ -70,11 +70,15 @@
       (testing "and still runs on push"
         (is (str/includes? cond- "github.event_name != 'pull_request'"))))))
 
-(deftest scanning-and-signing-stay-off-prs
-  (doseq [needle ["trivy" "cosign sign"]]
+(deftest publishing-side-effects-stay-off-prs
+  ;; The REPORT and the SIGNATURE are side effects of publishing a release, so
+  ;; they stay off PRs. The scan GATE is not a side effect — it's feedback, and it
+  ;; deliberately runs on PRs (see trivy-blocks-only-on-fixable-findings).
+  (doseq [[needle desc] [["full report" "the SARIF report"]
+                         ["cosign sign" "signing"]]]
     (let [s (step-named :merge needle)]
       (is (some? s) (str "no step matching " needle))
-      (is (= w/not-pr (:if s)) (str needle " should be gated to non-PR events")))))
+      (is (str/includes? (:if s) w/not-pr) (str desc " should be gated to non-PR events")))))
 
 (deftest fork-prs-never-reach-the-self-hosted-runner
   ;; The one that matters if this repo goes public. A self-hosted runner executes
@@ -128,6 +132,37 @@
     (is (some? installer))
     (is (= (:if signer) (:if installer))
         "installing cosign must be conditioned exactly like signing with it")))
+
+(deftest trivy-blocks-only-on-fixable-findings
+  ;; Measured 2026-08-12: 35 HIGH/CRITICAL, zero with a fix available. Blocking on
+  ;; severity alone would be permanently red with nothing actionable.
+  (let [gate (step-named :merge "fail only on vulnerabilities")]
+    (is (some? gate))
+    (is (true? (get-in gate [:with :ignore-unfixed])) "unfixable findings must not block")
+    (is (= "1" (get-in gate [:with :exit-code])) "fixable findings MUST block")
+    (is (nil? (:continue-on-error gate))
+        "a gate with continue-on-error is decoration, which is what this replaced")
+    (testing "and it runs on PRs — telling a contributor beats telling main"
+      (is (nil? (:if gate))))))
+
+(deftest the-full-report-never-blocks-and-is-kept
+  (let [report (step-named :merge "full report")
+        keep-  (step-named :merge "Keep the report")]
+    (is (= "0" (get-in report [:with :exit-code])) "the report must never fail a build")
+    (is (= "sarif" (get-in report [:with :format])))
+    (testing "and it leaves the runner, or it may as well not exist"
+      (is (some? keep-))
+      (is (= "trivy.sarif" (get-in keep- [:with :path]))))))
+
+(deftest code-scanning-upload-activates-itself-when-public
+  ;; Uploading needs Advanced Security on private repos. Rather than a step that
+  ;; is expected to fail, it turns itself on when the repo goes public.
+  (let [up (step-named :merge "code scanning")]
+    (is (some? up))
+    (is (str/includes? (:if up) "github.event.repository.private == false"))
+    (is (nil? (:continue-on-error up)) "no expected-to-fail steps"))
+  (testing "and the job can write the results"
+    (is (= "write" (get-in (job :merge) [:permissions :security-events])))))
 
 (deftest tests-gate-publishing
   (is (some #{"test"} (:needs (job :publish)))
