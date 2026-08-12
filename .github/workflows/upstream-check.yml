@@ -1,0 +1,93 @@
+name: upstream-check
+
+# Weekly: has Apache published a Fuseki newer than our default pin? If so, open
+# an issue telling us to bump + build. Renovate is the primary signal; this is
+# the belt-and-braces one — it also catches a Renovate outage or a muted PR.
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"   # Mondays 07:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  jena:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare upstream Fuseki releases against our pin
+        id: check
+        run: |
+          set -euo pipefail
+
+          # The tarball we actually consume. archive.apache.org is permanent and
+          # lists every release; dlcdn is latest-only.
+          UPSTREAM="$(curl -fsSL --retry 3 --retry-delay 5 \
+            https://archive.apache.org/dist/jena/binaries/ \
+            | grep -o 'apache-jena-fuseki-[0-9][0-9.]*\.tar\.gz' \
+            | sed 's/^apache-jena-fuseki-//; s/\.tar\.gz$//' \
+            | sort -u -V | tail -1)"
+          # Empty means the listing changed shape — fail loudly rather than
+          # silently reporting "up to date" forever.
+          [ -n "$UPSTREAM" ] || { echo "could not parse any release from the Jena archive listing" >&2; exit 1; }
+
+          PINNED="$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)"
+          [ -n "$PINNED" ] || { echo "could not read ARG JENA_VERSION from image/Dockerfile" >&2; exit 1; }
+
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "upstream latest: $UPSTREAM / our default pin: $PINNED"
+
+          # newer = sorts above the pin and isn't equal to it
+          if [ "$UPSTREAM" = "$PINNED" ] || \
+             [ "$(printf '%s\n%s\n' "$UPSTREAM" "$PINNED" | sort -V | tail -1)" = "$PINNED" ]; then
+            echo "newer=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "newer=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open (or reuse) the bump issue
+        if: steps.check.outputs.newer == 'true'
+        env:
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="Jena ${UPSTREAM} published upstream — bump sp-fuseki (pinned ${PINNED})"
+
+          EXISTING="$(gh issue list --repo "$REPO" --state open --limit 100 \
+            --json number,title --jq ".[] | select(.title == \"${TITLE}\") | .number" | head -1)"
+          if [ -n "$EXISTING" ]; then
+            echo "issue #${EXISTING} already open — nothing to do"
+            exit 0
+          fi
+
+          gh label create upstream --repo "$REPO" --color 0e8a16 \
+            --description "New upstream release to pick up" >/dev/null 2>&1 || true
+
+          # printf, not a heredoc: an unindented heredoc terminator would end the
+          # YAML block scalar this script lives in.
+          {
+            printf 'Apache Jena Fuseki **%s** is on archive.apache.org. Our default pin is **%s**.\n\n' "$UPSTREAM" "$PINNED"
+            printf 'To pick it up:\n\n'
+            printf '1. `ARG JENA_VERSION=%s` in `image/Dockerfile` — that is the leg tagged `latest`.\n' "$UPSTREAM"
+            printf '2. Add the outgoing `%s` to `EXTRA_JENA` in `.github/workflows/build.yml` if we keep publishing it.\n' "$PINNED"
+            printf '3. Merge to `main` — build publishes `%s-<run>`, `%s`, and moves `latest`.\n\n' "$UPSTREAM" "$UPSTREAM"
+            printf 'Read the Jena release notes first. The smoke test asserts our packaging contract, not Jena correctness.\n\n'
+            printf 'Renovate should already have a PR open for step 1 (3-day `minimumReleaseAge`). If it does not, that is the real finding.\n\n'
+            printf '_Opened by the weekly `upstream-check` workflow._\n'
+          } > "${RUNNER_TEMP}/issue-body.md"
+
+          gh issue create --repo "$REPO" --title "$TITLE" --label upstream \
+            --body-file "${RUNNER_TEMP}/issue-body.md"
+
+      - name: Up to date
+        if: steps.check.outputs.newer != 'true'
+        run: echo "pin ${{ steps.check.outputs.pinned }} is current (upstream latest ${{ steps.check.outputs.upstream }}) — no issue opened"
