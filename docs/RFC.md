@@ -124,7 +124,20 @@ A higher-level **EDN/aero convenience layer** (`fuseki.edn`, the whole server as
 data) is attractive but is **deferred to v0.2** and decided on its own merits —
 it would be the Nth config standard, and the dogfood needs none of it. When/if
 added, it is a *generator over the assembler TTL* with the passthrough above as
-the escape hatch, never a replacement. (See `examples/fuseki.edn` for the sketch.)
+the escape hatch, never a replacement. The sketch lives in
+[issue #2](https://github.com/Semantic-partners/sp-fuseki/issues/2), not in
+`examples/` — an unimplemented shape sitting next to working examples reads as
+something you can mount, which is exactly how it misled once already.
+
+**Decided (both paths are first-class):** bring a `config.ttl` and it is simply
+used, untouched — no EDN anywhere in your way. Embrace the EDN and you are
+*rewarded* with what TTL can't give you concisely: prefixes, federation,
+reasoner selection, aero `#env`/`#file` tags, and validation that fails loudly at
+boot instead of producing a half-configured server. EDN is not a fallback for
+people who lack a TTL; it's the better ergonomics for people who want them.
+Precedence when both are mounted: the TTL wins (never silently re-render
+someone's hand-written config) and the entrypoint **logs that the EDN was
+ignored** — conflicting sources of truth must never be a silent surprise.
 
 ### Secrets
 

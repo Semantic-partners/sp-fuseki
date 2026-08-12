@@ -70,6 +70,14 @@ an explicit precedence + escape-hatch contract:**
   - raw `config.ttl` mounted → pass through untouched (pure config-respecting).
   - `fuseki.edn` mounted, no `config.ttl` → render.
   - both → error, or documented winner. Don't leave it implicit.
+
+**RESOLVED** — documented winner, not an error: the TTL wins (never silently
+re-render a hand-written config) and the entrypoint logs that the EDN was
+ignored. Both paths are first-class — bring a TTL and it's simply used; embrace
+the EDN and you're *rewarded* with prefixes, federation, reasoner selection,
+aero `#env`/`#file` and loud validation. EDN is not a fallback for the
+TTL-less. See RFC → Config and [issue #2](https://github.com/Semantic-partners/sp-fuseki/issues/2).
+Still v0.2 — v0.1 ships the TTL path only, so the tension is not live yet.
   - Always write the rendered config to a known path and log it, so "what did it
     actually generate" is never a mystery.
 
@@ -248,9 +256,12 @@ right hook for all three tiers.
 - **Observability.** Only healthcheck is mentioned. Fuseki exposes
   `/$/metrics` (Prometheus) and uses log4j2 (configurable, and a security
   surface — log4shell). Decide what's wired and what's documented.
-- **EDN vs TTL config (open decision).** Promoted to weakpoint #9 — TTL makes
-  "config-respecting" trivially true and adds no new standard; EDN buys
-  ergonomics. Decide it separately from the bb decision.
+- **EDN vs TTL config.** ~~(open decision)~~ **Decided: both, and neither is the
+  poor relation.** TTL passthrough keeps "config-respecting" trivially true; the
+  EDN layer has to *earn* its place by being better than hand-written TTL, not
+  merely sufficient. Precedence and rationale in §1 above and
+  [issue #2](https://github.com/Semantic-partners/sp-fuseki/issues/2); still v0.2,
+  and still decided separately from the bb decision (which stands either way).
 - **Version alignment in the dogfood.** The `training-data` devcontainer runs
   the Jena **6.1.0** CLI toolchain but a **5.1.0** Fuseki service. v0.1 should
   target 6.x to align them; repointing at a 5.1.0 image would re-freeze the
