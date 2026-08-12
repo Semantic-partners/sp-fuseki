@@ -220,7 +220,8 @@ amd64+arm64 · pinned Jena from `archive.apache.org`.
 ## Build & test locally
 
 ```bash
-bash test/unit.sh                              # renderer contract, sub-second, no Docker
+git config core.hooksPath hooks                # once: regenerate + test on commit
+bash test/unit.sh                              # renderer + CI contract, sub-second, no Docker
 docker build -f image/Dockerfile -t sp-fuseki:dev .
 IMAGE=sp-fuseki:dev bash test/smoke.sh         # packaging contract, needs Docker
 ```
@@ -228,6 +229,28 @@ IMAGE=sp-fuseki:dev bash test/smoke.sh         # packaging contract, needs Docke
 Two layers on purpose. [test/render_test.clj](test/render_test.clj) pins what the
 EDN renders to and every way it refuses — fast enough to run on every edit.
 [test/smoke.sh](test/smoke.sh) proves the container actually behaves that way.
+
+### The CI workflow is generated, and tested
+
+[.github/workflows/build.yml](.github/workflows/build.yml) is **generated** from
+[ci/sp_fuseki/workflows.clj](ci/sp_fuseki/workflows.clj) — don't edit it. The
+pre-commit hook regenerates and stages it; CI re-checks with
+`bb ci/generate.clj --check` for anyone without the hook.
+
+Actions YAML is a programming language with no compiler and, worse, nothing to
+test. Generating it from data means the CI definition gets the same treatment as
+everything else here — [test/workflows_test.clj](test/workflows_test.clj) asserts
+that `latest` is only applied to the default Jena leg on `main`, that publishing
+is never enabled for fork PRs, that arm64 jobs target the self-hosted labels
+(a runner's *name* is not a label, and a wrong label **hangs** rather than
+failing), and that `fromJSON` gets valid JSON. The generator refuses to emit a
+workflow that uses an unavailable expression context, references an undeclared
+matrix key, needs a job that doesn't exist, or runs multi-command shell without
+`set -euo pipefail`.
+
+The prose explaining *why* each job looks the way it does lives in the Clojure,
+since YAML generators drop comments — that reasoning was worth more than the
+formatting it used to live in.
 
 The smoke test asserts the **packaging contract** — non-root, boot, `/$/ping`, a
 POST→query round-trip, a mounted config honoured (not merged), Fuseki's UI served
