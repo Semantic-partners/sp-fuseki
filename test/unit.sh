@@ -18,7 +18,10 @@ command -v bb >/dev/null 2>&1 || {
 
 echo "== sp-fuseki unit tests =="
 cd "$ROOT"
-bb --classpath "entrypoint:test" \
-   -e '(require (quote render-test))
-       (let [{:keys [fail error]} (clojure.test/run-tests (quote render-test))]
+# Two suites: the fuseki.edn renderer contract, and the CI workflow itself
+# (generated from ci/sp_fuseki/workflows.clj precisely so it can be tested).
+bb --classpath "entrypoint:ci:test" \
+   -e '(require (quote render-test) (quote workflows-test))
+       (let [{:keys [fail error]} (clojure.test/run-tests (quote render-test)
+                                                          (quote workflows-test))]
          (System/exit (if (pos? (+ fail error)) 1 0)))'
