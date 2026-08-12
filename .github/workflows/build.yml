@@ -51,7 +51,7 @@ jobs:
   # it never was while the only arm64 build was an emulated publish.
   test:
     needs: plan
-    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macanton-sp"]') || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +92,7 @@ jobs:
   publish:
     needs: [plan, test]
     if: github.event_name != 'pull_request'
-    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macanton-sp"]') || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       # Left parallel: the two arches share almost no layer blobs, so this isn't
