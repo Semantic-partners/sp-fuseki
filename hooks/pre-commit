@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Regenerate generated files and stage them, so a commit can never contain a
+# stale artefact.
+#
+# Install once (versioned hooks, nothing to copy):
+#   git config core.hooksPath hooks
+#
+# CI still runs `bb ci/generate.clj --check` as a backstop: a hook is local, and
+# anyone who hasn't run that command — every fork contributor — doesn't have it.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+if ! command -v bb >/dev/null 2>&1; then
+  echo "pre-commit: babashka (bb) not found — skipping workflow regeneration." >&2
+  echo "  Install bb, or CI's --check will fail the PR instead." >&2
+  exit 0
+fi
+
+before="$(git hash-object .github/workflows/build.yml 2>/dev/null || echo none)"
+bb ci/generate.clj >/dev/null
+after="$(git hash-object .github/workflows/build.yml)"
+
+if [ "$before" != "$after" ]; then
+  echo "pre-commit: regenerated .github/workflows/build.yml — staging it."
+  git add .github/workflows/build.yml
+fi
+
+# The workflow is code now, so its tests run with the rest of them. Fast enough
+# (sub-second) that there's no excuse to skip: a bad `latest` rule caught here
+# costs nothing, caught in CI costs a red main.
+bash test/unit.sh >/dev/null || {
+  echo "pre-commit: unit tests FAILED — commit aborted. Run: bash test/unit.sh" >&2
+  exit 1
+}

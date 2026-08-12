@@ -1,0 +1,10 @@
+;; babashka project paths, so `bb ci/generate.clj` and the test runner resolve
+;; namespaces without an explicit --classpath (including inside a container).
+;;
+;;   ci/        the build workflow as data + its generator
+;;   entrypoint/ the image's boot path and the fuseki.edn -> TTL renderer
+;;   test/      unit suites for both
+;;
+;; The image itself doesn't use this: it sets BABASHKA_CLASSPATH=/opt/sp-fuseki
+;; and runs from /fuseki, where there is no bb.edn.
+{:paths ["ci" "entrypoint" "test"]}
