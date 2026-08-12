@@ -6,11 +6,10 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-  schedule:
-    # Daily rebuild of every Jena leg — picks up base-image/JRE patches and
-    # re-runs the smoke test against the current pins. New-Jena detection is
-    # Renovate + the weekly upstream-check workflow, not this.
-    - cron: "17 6 * * *"
+# No cron. We build on version bumps, not on a clock: Renovate raises the PR and
+# the weekly upstream-check workflow catches anything it misses. Trade-off taken
+# knowingly — base-image/JRE CVE patches now land only when something bumps or
+# someone dispatches this manually.
 
 env:
   REGISTRY: ghcr.io
