@@ -34,6 +34,12 @@ docker run --rm -p 3030:3030 \
 
 # Headless: no UI, no admin area — same image
 docker run --rm -p 3030:3030 -e FUSEKI_UI=off ghcr.io/semantic-partners/sp-fuseki
+
+# Persistent (TDB2): mount a volume at /fuseki/databases — see Persistence below
+docker run --rm -p 3030:3030 \
+  -v sp-fuseki-data:/fuseki/databases \
+  -v "$PWD/examples/config-tdb2.ttl:/fuseki/config.ttl:ro" \
+  ghcr.io/semantic-partners/sp-fuseki
 ```
 
 Fuseki's own UI is at <http://localhost:3030/>.
@@ -56,10 +62,53 @@ Everything the image does is driven by these — nothing is hidden in a script.
 |---|---|---|
 | Assembler config | `/fuseki/config.ttl` | If present, **honoured untouched**. If absent, a minimal in-memory dataset is generated. Never merged or silently regenerated. |
 | Shiro auth config | `/fuseki/shiro.ini` | If present, **honoured untouched** (your escape hatch for any auth setup, incl. SOPS-decrypted secrets). If absent, generated from `FUSEKI_AUTH`. |
+| **Persistent data** | `/fuseki/databases` | **Mount your volume here** for TDB2 datasets. Pre-created in the image and owned by uid 1000 — see below. |
 
 The **effective** config and shiro that actually run are always written to
 `$FUSEKI_BASE` (`config.effective.ttl`, `shiro.ini`) and their paths logged at
 boot — so "what did it actually run" is never a mystery.
+
+### Persistence — where to mount, and why it matters
+
+Datasets are in-memory unless your config says otherwise. For TDB2, **mount a
+volume at `/fuseki/databases` and point `tdb2:location` inside it**:
+
+```bash
+docker run --rm -p 3030:3030 \
+  -v sp-fuseki-data:/fuseki/databases \
+  -v "$PWD/examples/config-tdb2.ttl:/fuseki/config.ttl:ro" \
+  ghcr.io/semantic-partners/sp-fuseki
+```
+
+[examples/config-tdb2.ttl](examples/config-tdb2.ttl) is a working starting point
+(`tdb2:location "/fuseki/databases/ds"` — absolute, so it never depends on CWD).
+
+**Mount there specifically.** The container runs as uid 1000, and a named volume
+inherits the ownership of the path it covers. `/fuseki/databases` exists in the
+image owned by `1000:1000`, so the volume is writable. Mount onto a path the
+image *doesn't* create and Docker makes it `root:root`:
+
+```
+-v vol:/fuseki/databases   ->  drwxr-xr-x 1000 1000   # writable
+-v vol:/some/other/path    ->  drwxr-xr-x    0    0   # Permission denied
+```
+
+The second case fails at boot with `AssemblerException: java.io.IOException: No
+such file or directory` and exit code 1 — which reads like a broken config but is
+purely permissions. If you hit that message, check ownership first.
+
+`/fuseki/run` (`$FUSEKI_BASE`) also works and is where Fuseki keeps its own work
+area — `backups/`, `logs/`, `configuration/`, plus our generated
+`config.effective.ttl`. Mounting *that* persists data too, but mixes it with
+regenerated boot files; prefer `/fuseki/databases` for data and mount
+`/fuseki/run` only if you want `/$/backup` output to survive.
+
+> **Bind mounts differ by platform.** On Docker Desktop (macOS/Windows) host
+> ownership is remapped — a host directory owned by your user shows up inside the
+> container as `1000:1000` and Just Works. On Linux the host uid is preserved, so
+> a bind mount needs `chown 1000:1000` (or `--user`) or the same permission
+> failure appears. A setup verified only on a Mac can still break on a Linux
+> host; named volumes avoid the whole question.
 
 ### Environment
 
@@ -108,8 +157,8 @@ It's Fuseki's own assembler vocabulary — add a `fuseki:Service`. See
 ## Defaults
 
 Non-root (uid 1000) · healthcheck on `/$/ping` · Fuseki's UI on · mutating admin
-API fenced · in-memory datasets (TDB2 is v0.2) · multi-arch amd64+arm64 · pinned
-Jena from `archive.apache.org`.
+API fenced · in-memory datasets unless your config says TDB2 · multi-arch
+amd64+arm64 · pinned Jena from `archive.apache.org`.
 
 ## Build & test locally
 
@@ -120,8 +169,9 @@ IMAGE=sp-fuseki:dev bash test/smoke.sh
 
 The smoke test asserts the **packaging contract** — non-root, boot, `/$/ping`, a
 POST→query round-trip, a mounted config honoured (not merged), Fuseki's UI served
-with its bundle intact, the mutating admin API fenced under `anon`, and
-`FUSEKI_UI=off` serving no UI while data endpoints keep working. It does **not**
+with its bundle intact, the mutating admin API fenced under `anon`,
+`FUSEKI_UI=off` serving no UI while data endpoints keep working, and TDB2 on a
+volume at `/fuseki/databases` surviving a restart. It does **not**
 test Jena's correctness; that's Apache's job (see
 [docs/ASSESSMENT.md](docs/ASSESSMENT.md) §6).
 

@@ -61,9 +61,16 @@ COPY entrypoint/entrypoint.clj /opt/sp-fuseki/entrypoint.clj
 ENV FUSEKI_BASE=/fuseki/run
 ENV FUSEKI_JAR=/opt/fuseki/fuseki-server.jar
 
-# Non-root. The data/runtime dir must be writable by the runtime user.
+# Non-root. The data/runtime dirs must be writable by the runtime user.
+#
+# /fuseki/databases exists in the image ON PURPOSE, even though it's empty: a
+# named volume mounted onto an existing path inherits that path's ownership, so
+# `-v vol:/fuseki/databases` just works as uid 1000. Mount onto a path that
+# ISN'T in the image and Docker creates it root-owned — TDB2 then dies with
+# "IOException: No such file or directory", which looks like a config error and
+# isn't. See README → Persistence.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin fuseki \
- && mkdir -p /fuseki/run \
+ && mkdir -p /fuseki/run /fuseki/databases \
  && chown -R fuseki:fuseki /fuseki
 USER fuseki
 WORKDIR /fuseki
