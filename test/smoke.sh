@@ -15,6 +15,13 @@
 #   8. TDB2 on a named volume survives a restart, and the documented mount path
 #      is writable as uid 1000 (the thing that silently breaks if the image
 #      stops pre-creating /fuseki/databases)
+#   9. fuseki.edn renders to TTL — mem/tdb2/reasoner datasets all served, the
+#      effective TTL is written, and the reasoner actually infers
+#  10. a mounted config.ttl beats a mounted fuseki.edn, and says so in the log
+#  11. a broken fuseki.edn is FATAL at boot with an actionable message
+#
+# 9-11 cover the EDN path; the renderer's own rules are unit-tested in
+# test/render_test.clj (bash test/unit.sh), which is the faster feedback loop.
 #
 # v0.1 datasets are in-memory by default; 8 asserts the *mount contract* for the
 # persistent option, not TDB2 tuning/backup behaviour (that's the v0.2 work).
@@ -26,11 +33,13 @@ IMAGE="${IMAGE:-sp-fuseki:dev}"
 PORT="${PORT:-13030}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VOL="sp-fuseki-smoke-$$"
+TMP="$(mktemp -d)"
 CIDS=()
 
 cleanup() {
   for c in "${CIDS[@]:-}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
   docker volume rm -f "$VOL" >/dev/null 2>&1 || true
+  rm -rf "$TMP"
 }
 trap cleanup EXIT
 
@@ -168,5 +177,66 @@ ask="$(curl -fsS -G "${base}/ds/sparql" \
 echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
   || fail "triple did not survive restart — persistence broken; got: $ask"
 pass "data survived a container restart"
+
+docker rm -f "$cid" >/dev/null; CIDS=()
+
+# 9. fuseki.edn as a config source, and its precedence against a mounted TTL.
+echo "[9] fuseki.edn renders to TTL"
+cid="$(docker run -d -p "${PORT}:3030" \
+  -v "$(cd "$HERE/.." && pwd)/examples/fuseki.edn:/fuseki/fuseki.edn:ro" \
+  -v "${VOL}:/fuseki/databases" \
+  "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+for ds in training kb training-inferred; do
+  curl -fsS -G "${base}/${ds}/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+    || fail "dataset /${ds} from fuseki.edn not served"
+done
+pass "all three datasets served (mem, tdb2, reasoner)"
+# The rendered file is a documented artefact, so assert it exists and is labelled.
+docker exec "$cid" sh -c 'grep -q "GENERATED from" /fuseki/run/config.effective.ttl' \
+  || fail "effective config not written/labelled as generated"
+docker exec "$cid" sh -c 'grep -q "tdb2:location \"/fuseki/databases/kb\"" /fuseki/run/config.effective.ttl' \
+  || fail "tdb2 location not rendered under the writable mount"
+pass "effective TTL written, tdb2 location under /fuseki/databases"
+# The reasoner dataset must actually infer, or ':reasoner' is decoration.
+curl -fsS -X POST -H 'Content-Type: text/turtle' \
+  --data-binary '@'"${HERE}/inference.ttl" "${base}/training-inferred/data?default" >/dev/null \
+  || fail "POST to reasoner-backed dataset failed"
+ask="$(curl -fsS -G "${base}/training-inferred/sparql" \
+  --data-urlencode 'query=ASK { <http://example.org/socrates> a <http://example.org/Mortal> }' \
+  -H 'Accept: application/sparql-results+json')"
+echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
+  || fail "RDFS inference did not entail the supertype; got: $ask"
+pass "RDFS reasoner entails rdfs:subClassOf (inference is real)"
+
+docker rm -f "$cid" >/dev/null; CIDS=()
+
+echo "[10] a mounted config.ttl beats a mounted fuseki.edn, loudly"
+cid="$(docker run -d -p "${PORT}:3030" \
+  -v "$(cd "$HERE/.." && pwd)/examples/config.ttl:/fuseki/config.ttl:ro" \
+  -v "$(cd "$HERE/.." && pwd)/examples/fuseki.edn:/fuseki/fuseki.edn:ro" \
+  "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -G "${base}/training/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "mounted config.ttl dataset /training not served"
+# /kb exists only in the EDN. If it answers, the EDN was rendered and the TTL lost.
+code="$(curl -s -o /dev/null -w '%{http_code}' -G "${base}/kb/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "404" ] || fail "EDN appears to have been used despite a mounted config.ttl (/kb -> $code)"
+pass "TTL won; EDN-only dataset /kb absent"
+# Capture first: `docker logs | grep -q` would SIGPIPE docker and trip pipefail
+# even on a successful match.
+logs="$(docker logs "$cid" 2>&1 || true)"
+echo "$logs" | grep -q "IGNORED" \
+  || fail "ignoring the EDN was not logged — conflicting config must never be silent"
+pass "the ignored EDN was logged"
+
+echo "[11] a broken fuseki.edn fails loudly at boot"
+docker rm -f "$cid" >/dev/null; CIDS=()
+printf '{:datasets [{:name "bad/name" :storage :mem :endpoints #{:query}}]}\n' > "${TMP}/bad.edn"
+out="$(docker run --rm -v "${TMP}/bad.edn:/fuseki/fuseki.edn:ro" "$IMAGE" 2>&1 || true)"
+echo "$out" | grep -q "FATAL" || fail "invalid EDN did not produce a FATAL message; got: $out"
+echo "$out" | grep -q "URL path segment" \
+  || fail "error message did not explain the problem; got: $out"
+pass "invalid EDN -> FATAL with an actionable message, no half-configured boot"
 
 echo "== smoke PASSED =="

@@ -68,13 +68,60 @@ Everything the image does is driven by these — nothing is hidden in a script.
 
 | Mount | Default path | Behaviour |
 |---|---|---|
-| Assembler config | `/fuseki/config.ttl` | If present, **honoured untouched**. If absent, a minimal in-memory dataset is generated. Never merged or silently regenerated. |
+| Assembler config | `/fuseki/config.ttl` | If present, **honoured untouched**. Wins over `fuseki.edn`. Never merged or silently regenerated. |
+| EDN config | `/fuseki/fuseki.edn` | If present (and no `config.ttl`), validated and **rendered** to assembler TTL — see below. |
 | Shiro auth config | `/fuseki/shiro.ini` | If present, **honoured untouched** (your escape hatch for any auth setup, incl. SOPS-decrypted secrets). If absent, generated from `FUSEKI_AUTH`. |
 | **Persistent data** | `/fuseki/databases` | **Mount your volume here** for TDB2 datasets. Pre-created in the image and owned by uid 1000 — see below. |
 
 The **effective** config and shiro that actually run are always written to
 `$FUSEKI_BASE` (`config.effective.ttl`, `shiro.ini`) and their paths logged at
 boot — so "what did it actually run" is never a mystery.
+
+### Config: TTL or EDN, both first-class
+
+**Bring a `config.ttl`** and it is simply used, untouched. No EDN gets in your way.
+
+**Or write `fuseki.edn`** and get what hand-written assembler TTL can't give you
+concisely — declared prefixes, TDB2 locations emitted for you, reasoner
+selection, secrets via reader tags, and validation that refuses to boot rather
+than half-configuring:
+
+```clojure
+{:auth     {:mode :anon}
+ :prefixes {:ex "http://example.org/"}
+ :datasets [{:name "kb"  :storage :tdb2 :endpoints #{:query :update :gsp-rw}}
+            {:name "inf" :storage :mem  :endpoints #{:query :gsp-rw} :reasoner :rdfs}]}
+```
+
+```bash
+docker run --rm -p 3030:3030 \
+  -v "$PWD/examples/fuseki.edn:/fuseki/fuseki.edn:ro" \
+  -v sp-fuseki-data:/fuseki/databases \
+  ghcr.io/semantic-partners/sp-fuseki
+```
+
+Full example: [examples/fuseki.edn](examples/fuseki.edn). It is a **generator over
+the assembler TTL**, never a replacement — anything the EDN can't express, drop to
+TTL and mount that instead.
+
+| | |
+|---|---|
+| `:datasets` | `:name`, `:storage` (`:mem`/`:tdb2`), `:endpoints` (`:query`/`:update`/`:gsp-rw`/`:gsp-r`), `:reasoner` (`:none`/`:rdfs`/`:owl-micro`) |
+| `:prefixes` | keyword → IRI, declared once and emitted into the TTL |
+| `:auth` | `{:mode :anon}` or `{:mode :basic}` (`FUSEKI_AUTH` wins if set) |
+| `:server` | `{:port 3030}` |
+| `:ui` | `{:enabled true}` |
+| `#env "VAR"` / `#file "path"` | read a secret at boot — it never lives in the config |
+
+**Precedence.** Both mounted → the TTL wins and the entrypoint **logs that the EDN
+was ignored**; conflicting sources of truth are never a silent surprise. The
+rendered result is always written to `$FUSEKI_BASE/config.effective.ttl` for you
+to read. A malformed EDN is a `FATAL` at boot with the reason, not a container
+that comes up missing a dataset.
+
+What the EDN promises is specified in
+[test/render_test.clj](test/render_test.clj) — those tests are the contract,
+written to be read as documentation.
 
 ### Persistence — where to mount, and why it matters
 
@@ -124,6 +171,8 @@ regenerated boot files; prefer `/fuseki/databases` for data and mount
 |---|---|---|
 | `FUSEKI_BASE` | `/fuseki/run` | Runtime/data dir (must be writable by uid 1000). |
 | `FUSEKI_CONFIG` | `/fuseki/config.ttl` | Where to look for a mounted assembler config. |
+| `FUSEKI_EDN` | `/fuseki/fuseki.edn` | Where to look for a mounted EDN config (used only if no `config.ttl`). |
+| `FUSEKI_TDB2_ROOT` | `/fuseki/databases` | Directory `:tdb2` datasets are rendered under. |
 | `FUSEKI_SHIRO` | `/fuseki/shiro.ini` | Where to look for a mounted shiro.ini. |
 | `FUSEKI_PORT` | `3030` | Listen port. |
 | `FUSEKI_DATASET` | `ds` | Name of the generated default dataset (when no config mounted). |
@@ -171,15 +220,22 @@ amd64+arm64 · pinned Jena from `archive.apache.org`.
 ## Build & test locally
 
 ```bash
+bash test/unit.sh                              # renderer contract, sub-second, no Docker
 docker build -f image/Dockerfile -t sp-fuseki:dev .
-IMAGE=sp-fuseki:dev bash test/smoke.sh
+IMAGE=sp-fuseki:dev bash test/smoke.sh         # packaging contract, needs Docker
 ```
+
+Two layers on purpose. [test/render_test.clj](test/render_test.clj) pins what the
+EDN renders to and every way it refuses — fast enough to run on every edit.
+[test/smoke.sh](test/smoke.sh) proves the container actually behaves that way.
 
 The smoke test asserts the **packaging contract** — non-root, boot, `/$/ping`, a
 POST→query round-trip, a mounted config honoured (not merged), Fuseki's UI served
 with its bundle intact, the mutating admin API fenced under `anon`,
-`FUSEKI_UI=off` serving no UI while data endpoints keep working, and TDB2 on a
-volume at `/fuseki/databases` surviving a restart. It does **not**
+`FUSEKI_UI=off` serving no UI while data endpoints keep working, TDB2 on a
+volume at `/fuseki/databases` surviving a restart, and the EDN path — rendering,
+real RDFS entailment, TTL-beats-EDN precedence, and a malformed EDN failing loudly
+at boot. It does **not**
 test Jena's correctness; that's Apache's job (see
 [docs/ASSESSMENT.md](docs/ASSESSMENT.md) §6).
 
