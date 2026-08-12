@@ -20,6 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # build.yml is generated from ci/sp_fuseki/workflows.clj. The pre-commit hook
+      # regenerates it, but a hook is local — fork contributors don't have it — so
+      # this is the backstop that catches a stale committed artefact.
+      - name: Generated workflow is up to date
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/w" -w /w --entrypoint bash \
+            babashka/babashka@sha256:4d267bbf616b9e2c9768fa38dc042909b1a26900ed958f92be2b1d8a39ef39c5 \
+            -c 'bb ci/generate.clj --check'
+
       - name: actionlint (workflow syntax, expression contexts, shellcheck)
         # Pinned by digest, not :latest — a lint that silently changes rules under
         # you is worse than no lint. Renovate can bump this.
