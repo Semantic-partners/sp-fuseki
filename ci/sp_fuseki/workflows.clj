@@ -282,7 +282,9 @@
      :if same-repo-or-push
      :runs-on hosted
      :strategy (m :fail-fast false :matrix (m :jena jena-matrix))
-     :permissions (m :contents "read" :packages "write" :id-token "write")
+     :permissions (m :contents "read" :packages "write" :id-token "write"
+                     ;; for the code-scanning upload
+                     :security-events "write")
      :steps [(m :uses "actions/download-artifact@v4"
                 :with (m :pattern "digest-${{ matrix.jena }}-*"
                          :merge-multiple true
@@ -347,15 +349,57 @@
                           "for want in linux/amd64 linux/arm64; do\n"
                           "  case \"$PLATFORMS\" in *\"$want\"*) ;; *) echo \"missing $want in the manifest\" >&2; exit 1 ;; esac\n"
                           "done\n"))
-             (m :name "Trivy scan (report; non-blocking until we triage a baseline)"
+             ;; TWO scans, because "is there anything we could fix?" and "what is
+             ;; in this image?" are different questions and only one should be able
+             ;; to fail a build.
+             ;;
+             ;; The old single step wrote trivy.sarif to a runner that was then
+             ;; destroyed — no upload, no artifact, continue-on-error, exit-code 0.
+             ;; It produced the appearance of scanning and nothing else.
+             ;;
+             ;; Measured 2026-08-12: 35 HIGH/CRITICAL, of which ZERO have a fix
+             ;; available (21 affected, 13 fix_deferred, 1 will_not_fix), all from
+             ;; Debian 12 base packages; the Java scanner finds nothing. So blocking
+             ;; on HIGH/CRITICAL would be red on every build forever with nothing
+             ;; actionable — a wall, not a backlog.
+             (m :name "Trivy — fail only on vulnerabilities that HAVE a fix"
                 :if not-pr
-                :continue-on-error true
+                :uses "aquasecurity/trivy-action@v0.36.0"
+                :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")
+                         :format "table"
+                         ;; The whole gate: a patch exists and we are still shipping
+                         ;; without it. Currently zero, so this goes in green and
+                         ;; goes red the day that stops being true.
+                         :ignore-unfixed true
+                         :exit-code "1"
+                         :severity "HIGH,CRITICAL"))
+
+             ;; The full picture, unfixable included, as a report. Never blocks.
+             (m :name "Trivy — full report (SARIF)"
+                :if (str not-pr " && always()")
                 :uses "aquasecurity/trivy-action@v0.36.0"
                 :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")
                          :format "sarif"
                          :output "trivy.sarif"
                          :exit-code "0"
                          :severity "HIGH,CRITICAL"))
+             ;; Readable today, on a private repo, with no Advanced Security.
+             (m :name "Keep the report"
+                :if (str not-pr " && always()")
+                :uses "actions/upload-artifact@v4"
+                :with (m :name "trivy-${{ matrix.jena }}"
+                         :path "trivy.sarif"
+                         :retention-days 30
+                         :if-no-files-found "warn"))
+             ;; Code scanning needs Advanced Security on private repos, so this
+             ;; activates itself when the repo goes public rather than sitting here
+             ;; failing. Not continue-on-error: a step expected to fail is the kind
+             ;; of decoration this change exists to delete.
+             (m :name "Upload to code scanning (public repos only)"
+                :if (str not-pr " && always() && github.event.repository.private == false")
+                :uses "github/codeql-action/upload-sarif@v3"
+                :with (m :sarif_file "trivy.sarif"
+                         :category (str "trivy-${{ matrix.jena }}")))
              (m :name "Sign image (cosign keyless)"
                 :if not-pr
                 :env (m :IMG image :DIGEST "${{ steps.merge.outputs.digest }}")
