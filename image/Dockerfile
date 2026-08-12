@@ -5,8 +5,10 @@
 # babashka entrypoint. Multi-arch (amd64 + arm64), non-root, healthchecked.
 
 # --- versions (Renovate-managed) ---
+# This is the DEFAULT Jena — the leg CI tags `latest`. CI also builds the older
+# versions listed in EXTRA_JENA (.github/workflows/build.yml) via --build-arg.
 # renovate: datasource=maven depName=org.apache.jena:jena-fuseki-server
-ARG JENA_VERSION=6.1.0
+ARG JENA_VERSION=6.2.0
 # Temurin 21 JRE — Jena 6.x targets Java 21. (Renovate datasource TBD; bump with Jena.)
 ARG TEMURIN_VERSION=21.0.5+11
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
