@@ -31,6 +31,7 @@ jobs:
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
+      image: ${{ steps.p.outputs.image }}
     steps:
       - uses: actions/checkout@v4
       - id: p
@@ -41,38 +42,43 @@ jobs:
           MATRIX="$(printf '%s\n' $EXTRA_JENA "$DEF" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)"
           echo "default=$DEF" >> "$GITHUB_OUTPUT"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          # GHCR requires a lowercase image name.
+          echo "image=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/sp-fuseki" >> "$GITHUB_OUTPUT"
           echo "jena legs: $MATRIX  (latest -> $DEF)"
 
-  # Gate: build amd64, load locally, assert the packaging contract. Per Jena leg.
-  smoke:
+  # Gate: build and test EACH ARCH NATIVELY. amd64 on hosted, arm64 on the
+  # self-hosted Apple Silicon runner — so arm64 is exercised in CI at all, which
+  # it never was while the only arm64 build was an emulated publish.
+  test:
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build (amd64, load)
+      - name: Build (native, load)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: image/Dockerfile
           load: true
           tags: sp-fuseki:ci-${{ matrix.jena }}
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           build-args: |
             JENA_VERSION=${{ matrix.jena }}
-          # Shared with the publish job below, so the JRE/Fuseki/babashka
-          # downloads happen once per leg instead of once per job. Fewer requests
-          # is the real fix for the GitHub 503s that kept failing publish.
-          cache-from: type=gha,scope=jena-${{ matrix.jena }}
-          cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}
+          # Shared with publish below, so the JRE/Fuseki/babashka downloads happen
+          # once per leg instead of once per job. Fewer requests is the real fix
+          # for the GitHub 503s that kept failing publish.
+          cache-from: type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
+
       # Renderer contract, run with the bb that actually ships in the image — no
-      # third-party setup action, and no chance of testing a different bb version
-      # than the entrypoint uses. Before the integration tests: it's sub-second
-      # and a broken rendering rule should fail fast.
+      # third-party setup action, no chance of testing a different bb version than
+      # the entrypoint uses. Sub-second, so it runs before the slow tests.
       - name: Unit tests (fuseki.edn renderer)
         run: |
           docker run --rm -v "$PWD:/w" -w /w \
@@ -81,17 +87,68 @@ jobs:
       - name: Packaging smoke test
         run: IMAGE=sp-fuseki:ci-${{ matrix.jena }} bash test/smoke.sh
 
-  # Publish: multi-arch build + push, SBOM, scan, sign. Skips PRs. Per Jena leg.
+  # Publish per arch, pushed BY DIGEST with no tags. No QEMU anywhere: each arch
+  # is built by a runner of that arch. Tags are applied once, in `merge`.
   publish:
-    needs: [plan, smoke]
+    needs: [plan, test]
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      # Left parallel: the two arches share almost no layer blobs, so this isn't
+      # the shared-blob contention that made GHCR 403 a blob HEAD when two
+      # same-arch multi-arch pushes raced.
+      matrix:
+        jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        arch: [amd64, arm64]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: image/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            JENA_VERSION=${{ matrix.jena }}
+          outputs: type=image,name=${{ needs.plan.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
+
+      - name: Stash the digest for the merge job
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.jena }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  # Assemble one multi-arch manifest per Jena leg from the per-arch digests, then
+  # tag, scan and sign it. Tag logic lives here alone, so `latest` can't be
+  # applied twice or by the wrong arch.
+  merge:
+    needs: [plan, publish]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Sequential on purpose. The legs differ only in the Jena layer, so they push
-      # identical base blobs; racing them made GHCR 403 a blob HEAD mid-upload and
-      # fail the 6.1.0 leg. Same runner minutes, just not concurrent.
-      max-parallel: 1
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
     permissions:
@@ -99,14 +156,11 @@ jobs:
       packages: write
       id-token: write   # cosign keyless
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Derive image name (lowercase — GHCR requires it)
-        id: ver
-        run: |
-          echo "image=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/sp-fuseki" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.jena }}-*
+          merge-multiple: true
+          path: /tmp/digests
       - uses: docker/setup-buildx-action@v3
       - uses: sigstore/cosign-installer@v3
       - uses: docker/login-action@v3
@@ -119,35 +173,47 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.ver.outputs.image }}
+          images: ${{ needs.plan.outputs.image }}
           tags: |
             type=raw,value=${{ matrix.jena }}-${{ github.run_number }}
             type=raw,value=${{ matrix.jena }}
             type=raw,value=latest,enable=${{ matrix.jena == needs.plan.outputs.default && github.ref == 'refs/heads/main' }}
 
-      - name: Build + push (multi-arch)
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: image/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            JENA_VERSION=${{ matrix.jena }}
-          # Reuses the smoke job's amd64 layers for this leg; only arm64 is new work.
-          cache-from: type=gha,scope=jena-${{ matrix.jena }}
-          cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}
-          provenance: true
-          sbom: true
+      - name: Create the manifest list
+        id: merge
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+        run: |
+          set -euo pipefail
+          ls -1 /tmp/digests
+          # -t for every tag metadata-action resolved, then one image@digest per arch.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(for f in /tmp/digests/*; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
+          # The manifest-list digest is what we scan and sign.
+          FIRST_TAG="$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          DIGEST="$(docker buildx imagetools inspect "$FIRST_TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "published $FIRST_TAG -> $DIGEST"
+
+      - name: Verify both architectures are in the manifest
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          set -euo pipefail
+          PLATFORMS="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw \
+            | jq -r '[.manifests[] | select(.platform.os=="linux") | "\(.platform.os)/\(.platform.architecture)"] | unique | join(" ")')"
+          echo "platforms: $PLATFORMS"
+          for want in linux/amd64 linux/arm64; do
+            case "$PLATFORMS" in *"$want"*) ;; *) echo "missing $want in the manifest" >&2; exit 1 ;; esac
+          done
 
       - name: Trivy scan (report; non-blocking until we triage a baseline)
         continue-on-error: true
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ steps.ver.outputs.image }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ needs.plan.outputs.image }}@${{ steps.merge.outputs.digest }}
           format: sarif
           output: trivy.sarif
           exit-code: "0"
@@ -155,7 +221,7 @@ jobs:
 
       - name: Sign image (cosign keyless)
         env:
-          IMG: ${{ steps.ver.outputs.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          IMG: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ steps.merge.outputs.digest }}
         run: |
           cosign sign --yes "${IMG}@${DIGEST}"
