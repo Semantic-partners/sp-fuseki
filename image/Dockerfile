@@ -14,7 +14,19 @@ ARG TEMURIN_VERSION=21.0.5+11
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
 ARG BB_VERSION=1.12.216
 
-FROM debian:bookworm-slim
+# ---------------------------------------------------------------------------
+# Stage 1: fetch. Runs NATIVELY on the build machine (--platform=$BUILDPLATFORM)
+# and selects artifacts for $TARGETARCH.
+#
+# Why: every download and untar here used to run inside the target image, which
+# for linux/arm64 on an amd64 CI runner means QEMU emulation. Emulated curl
+# pulling ~200MB (JRE + Fuseki + babashka) is slow and flaky — it failed two
+# publishes in a row, `exit 22` (HTTP error) and `exit 56` (connection reset
+# mid-transfer), and `--retry` didn't save the second one. Nothing here needs to
+# EXECUTE target-arch code; it only needs to unpack it. So fetch natively and
+# copy the bytes across.
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS fetch
 ARG JENA_VERSION
 ARG TEMURIN_VERSION
 ARG BB_VERSION
@@ -24,7 +36,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
-# Temurin JRE 21. TARGETARCH is set by buildx (amd64 on CI, arm64 on Apple Silicon).
+# Patient, exponential backoff — NOT a fixed short delay. GitHub rate-limits
+# unauthenticated release downloads, and a run fetches these once per target
+# platform per job, so the limit is reachable. `--retry 5 --retry-delay 3` spans
+# only ~15s and lost to a 503; no --retry-delay means curl backs off
+# exponentially, and --retry-max-time lets it ride out a throttle window.
+ENV CURL="curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20"
+
+# Temurin JRE 21 for the TARGET arch.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) JRE_ARCH=x64 ;; \
@@ -34,27 +53,48 @@ RUN set -eux; \
     V="$TEMURIN_VERSION"; \
     TAG="jdk-$(echo "$V" | sed 's/+/%2B/')"; \
     FILE="OpenJDK21U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
-    mkdir -p /opt/jre; tar -xzf /tmp/jre.tgz -C /opt/jre --strip-components=1; rm /tmp/jre.tgz
-ENV JAVA_HOME=/opt/jre
-ENV PATH="/opt/jre/bin:${PATH}"
+    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
+    mkdir -p /out/jre; tar -xzf /tmp/jre.tgz -C /out/jre --strip-components=1; rm /tmp/jre.tgz
 
-# Apache Jena Fuseki (standalone). archive.apache.org is permanent — dlcdn is
-# latest-only and 404s a pinned version once a newer Jena ships.
+# Apache Jena Fuseki (standalone, arch-independent). archive.apache.org is
+# permanent — dlcdn is latest-only and 404s a pinned version once a newer Jena ships.
 RUN set -eux; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz" -o /tmp/fuseki.tgz; \
-    mkdir -p /opt/fuseki; tar -xzf /tmp/fuseki.tgz -C /opt/fuseki --strip-components=1; rm /tmp/fuseki.tgz
+    $CURL "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz" -o /tmp/fuseki.tgz; \
+    mkdir -p /out/fuseki; tar -xzf /tmp/fuseki.tgz -C /out/fuseki --strip-components=1; rm /tmp/fuseki.tgz; \
+    test -f /out/fuseki/fuseki-server.jar
 
-# babashka — the entrypoint runtime (arch-specific static binary).
+# babashka — the entrypoint runtime (arch-specific static binary). Verified
+# against the .sha256 the release publishes: this is a GitHub release asset
+# fetched over the network, and a truncated download should fail here rather
+# than produce a broken image.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) BB_ARCH=amd64 ;; \
       arm64) BB_ARCH=aarch64 ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 "https://github.com/babashka/babashka/releases/download/v${BB_VERSION}/babashka-${BB_VERSION}-linux-${BB_ARCH}-static.tar.gz" -o /tmp/bb.tgz; \
-    tar -xzf /tmp/bb.tgz -C /usr/local/bin bb; rm /tmp/bb.tgz; \
-    bb --version
+    BASE="https://github.com/babashka/babashka/releases/download/v${BB_VERSION}/babashka-${BB_VERSION}-linux-${BB_ARCH}-static.tar.gz"; \
+    $CURL "$BASE" -o /tmp/bb.tgz; \
+    $CURL "${BASE}.sha256" -o /tmp/bb.sha256; \
+    echo "$(cat /tmp/bb.sha256)  /tmp/bb.tgz" | sha256sum -c -; \
+    mkdir -p /out/bin; tar -xzf /tmp/bb.tgz -C /out/bin bb; rm /tmp/bb.tgz /tmp/bb.sha256
+
+# ---------------------------------------------------------------------------
+# Stage 2: the image itself, for $TARGETPLATFORM.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+# curl stays in the final image — the HEALTHCHECK uses it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=fetch /out/jre    /opt/jre
+COPY --from=fetch /out/fuseki /opt/fuseki
+COPY --from=fetch /out/bin/bb /usr/local/bin/bb
+
+ENV JAVA_HOME=/opt/jre
+ENV PATH="/opt/jre/bin:${PATH}"
 
 # The whole entrypoint tree: entrypoint.clj (orchestration) + sp_fuseki/render.clj
 # (pure rendering, unit-tested by test/render_test.clj).
@@ -77,6 +117,11 @@ ENV BABASHKA_CLASSPATH=/opt/sp-fuseki
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin fuseki \
  && mkdir -p /fuseki/run /fuseki/databases \
  && chown -R fuseki:fuseki /fuseki
+
+# Both binaries must actually run on THIS arch — the one thing the fetch stage
+# can't check, since it runs on the build platform.
+RUN set -eux; bb --version; java -version
+
 USER fuseki
 WORKDIR /fuseki
 
