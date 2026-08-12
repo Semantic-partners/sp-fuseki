@@ -7,17 +7,45 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # Daily fallback poll — Renovate is the primary new-Jena signal; this catches
-    # a missed bump and re-runs the smoke test against the current pin.
+    # Daily rebuild of every Jena leg — picks up base-image/JRE patches and
+    # re-runs the smoke test against the current pins. New-Jena detection is
+    # Renovate + the weekly upstream-check workflow, not this.
     - cron: "17 6 * * *"
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  # Gate: build amd64, load locally, assert the packaging contract.
-  smoke:
+  # One place decides what we build. The Dockerfile's JENA_VERSION (Renovate-managed)
+  # is the default leg — it gets the moving `latest` tag. EXTRA_JENA lists the older
+  # versions we still publish alongside it.
+  plan:
     runs-on: ubuntu-latest
+    env:
+      EXTRA_JENA: "6.1.0"
+    outputs:
+      default: ${{ steps.p.outputs.default }}
+      matrix: ${{ steps.p.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        run: |
+          set -euo pipefail
+          DEF="$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)"
+          [ -n "$DEF" ] || { echo "could not read ARG JENA_VERSION from image/Dockerfile" >&2; exit 1; }
+          MATRIX="$(printf '%s\n' $EXTRA_JENA "$DEF" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)"
+          echo "default=$DEF" >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "jena legs: $MATRIX  (latest -> $DEF)"
+
+  # Gate: build amd64, load locally, assert the packaging contract. Per Jena leg.
+  smoke:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -27,16 +55,22 @@ jobs:
           context: .
           file: image/Dockerfile
           load: true
-          tags: sp-fuseki:ci
+          tags: sp-fuseki:ci-${{ matrix.jena }}
           platforms: linux/amd64
+          build-args: |
+            JENA_VERSION=${{ matrix.jena }}
       - name: Packaging smoke test
-        run: IMAGE=sp-fuseki:ci bash test/smoke.sh
+        run: IMAGE=sp-fuseki:ci-${{ matrix.jena }} bash test/smoke.sh
 
-  # Publish: multi-arch build + push, SBOM, scan, sign. Skips PRs.
+  # Publish: multi-arch build + push, SBOM, scan, sign. Skips PRs. Per Jena leg.
   publish:
-    needs: smoke
+    needs: [plan, smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
     permissions:
       contents: read
       packages: write
@@ -44,12 +78,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Derive image name (lowercase — GHCR requires it) + two-axis tags
+      - name: Derive image name (lowercase — GHCR requires it)
         id: ver
         run: |
-          JENA=$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)
-          echo "jena=$JENA" >> "$GITHUB_OUTPUT"
-          echo "sp_build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "image=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/sp-fuseki" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
@@ -61,15 +92,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Metadata / tags
+      - name: Metadata / two-axis tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.ver.outputs.image }}
           tags: |
-            type=raw,value=${{ steps.ver.outputs.jena }}-${{ steps.ver.outputs.sp_build }}
-            type=raw,value=${{ steps.ver.outputs.jena }}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ matrix.jena }}-${{ github.run_number }}
+            type=raw,value=${{ matrix.jena }}
+            type=raw,value=latest,enable=${{ matrix.jena == needs.plan.outputs.default && github.ref == 'refs/heads/main' }}
 
       - name: Build + push (multi-arch)
         id: build
@@ -81,6 +112,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            JENA_VERSION=${{ matrix.jena }}
           provenance: true
           sbom: true
 
