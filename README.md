@@ -108,10 +108,17 @@ TTL and mount that instead.
 |---|---|
 | `:datasets` | `:name`, `:storage` (`:mem`/`:tdb2`), `:endpoints` (`:query`/`:update`/`:gsp-rw`/`:gsp-r`), `:reasoner` (`:none`/`:rdfs`/`:owl-micro`) |
 | `:prefixes` | keyword → IRI, declared once and emitted into the TTL |
-| `:auth` | `{:mode :anon}` or `{:mode :basic}` (`FUSEKI_AUTH` wins if set) |
+| `:auth` | `{:mode :anon}` or `{:mode :basic}` |
 | `:server` | `{:port 3030}` |
 | `:ui` | `{:enabled true}` |
 | `#env "VAR"` / `#file "path"` | read a secret at boot — it never lives in the config |
+
+**`:auth` and `:ui` are also env vars.** An explicitly set `FUSEKI_AUTH` /
+`FUSEKI_UI` wins, then the EDN, then the default — and the resolved value is
+logged **with its source** (`ui: off (from fuseki.edn :ui)`), so "why is the UI
+off" never needs a bisect. They apply only when the EDN is the config source: a
+mounted `config.ttl` means the EDN was ignored wholesale, and half-honouring an
+ignored file would be worse than ignoring it.
 
 **Precedence.** Both mounted → the TTL wins and the entrypoint **logs that the EDN
 was ignored**; conflicting sources of truth are never a silent surprise. The

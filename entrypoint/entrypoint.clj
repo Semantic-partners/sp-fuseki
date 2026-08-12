@@ -17,10 +17,18 @@
 ;;   FUSEKI_PORT                  listen port                   (default 3030)
 ;;   FUSEKI_DATASET               default ds name (no config)   (default ds)
 ;;   FUSEKI_AUTH                  anon | basic                  (default anon)
+;;                                — also settable as :auth {:mode ...} in fuseki.edn
 ;;   FUSEKI_ADMIN_USER            basic-auth user               (default admin)
 ;;   FUSEKI_ADMIN_PASSWORD        basic-auth secret (env)
 ;;   FUSEKI_ADMIN_PASSWORD_FILE   basic-auth secret (file; e.g. a Docker secret)
 ;;   FUSEKI_UI                    on | off                      (default on)
+;;                                — also settable as :ui {:enabled ...} in fuseki.edn
+;;
+;; Precedence for the two settings the EDN can also carry (:auth, :ui): an
+;; explicitly set env var wins, then the EDN, then the default — and the resolved
+;; value is logged WITH ITS SOURCE, so "why is the UI off" never needs a bisect.
+;; The EDN's copies apply only when the EDN is the config source; a mounted
+;; config.ttl means the EDN was ignored wholesale.
 ;;   FUSEKI_TDB2_ROOT             where :tdb2 datasets live      (default /fuseki/databases)
 ;;   FUSEKI_JAR                   fuseki-server.jar             (default /opt/fuseki/fuseki-server.jar)
 ;;
@@ -50,9 +58,15 @@
 (def shiro-in  (env "FUSEKI_SHIRO"      "/fuseki/shiro.ini"))
 (def port      (env "FUSEKI_PORT"       "3030"))
 (def ds-name   (env "FUSEKI_DATASET"    "ds"))
-(def auth      (env "FUSEKI_AUTH"       "anon"))
-(def ui        (env "FUSEKI_UI"         "on"))
 (def tdb2-root (env "FUSEKI_TDB2_ROOT"  "/fuseki/databases"))
+
+;; Settings the EDN can also carry. Held as raw env so "explicitly set" is
+;; distinguishable from "defaulted" — that distinction IS the precedence rule:
+;; an explicit env var beats the file, the file beats the default.
+(def env-auth (System/getenv "FUSEKI_AUTH"))
+(def env-ui   (System/getenv "FUSEKI_UI"))
+(def auth-default "anon")
+(def ui-default   "on")
 (def jar       (env "FUSEKI_JAR"        "/opt/fuseki/fuseki-server.jar"))
 
 ;; The one jar carries both servers. Its manifest Main-Class is the UI + admin
@@ -77,17 +91,21 @@
       pw pw
       :else nil)))
 
-(defn render-edn
-  "Parse + validate + render an EDN config, turning any failure into a clear,
-  single-line FATAL rather than a Clojure stack trace."
-  [text source]
-  (try
-    (render/edn->ttl (render/parse text) {:source source :tdb2-root tdb2-root})
-    (catch Exception e
-      (die (str source ": " (ex-message e))))))
+(defn- attempt
+  "Run f, turning any failure into a clear single-line FATAL rather than a
+  Clojure stack trace."
+  [source f]
+  (try (f) (catch Exception e (die (str source ": " (ex-message e))))))
+
+(defn- render-ttl [cfg source]
+  (attempt source #(render/edn->ttl cfg {:source source :tdb2-root tdb2-root})))
 
 (defn resolve-config
-  "Returns [ttl description]. See the resolution order in the header."
+  "Returns {:ttl :descr :edn}. The EDN is parsed ONCE and handed back, so the
+  settings it carries (:auth, :ui) come from the same value we rendered — reading
+  the file twice invited the two to disagree.
+
+  Resolution order is in the header."
   []
   (let [have-ttl (fs/exists? cfg-in)
         have-edn (fs/exists? edn-in)]
@@ -97,29 +115,46 @@
             (log "NOTE:" edn-in "is present but IGNORED —" cfg-in
                  "wins. A mounted config.ttl is always honoured untouched."))
           (log "config: honouring mounted" cfg-in)
-          [(slurp cfg-in) (str "mounted " cfg-in)])
+          {:ttl (slurp cfg-in) :descr (str "mounted " cfg-in) :edn nil})
 
       have-edn
-      (do (log "config: rendering" edn-in "-> assembler TTL")
-          [(render-edn (slurp edn-in) edn-in) (str "rendered from " edn-in)])
+      (let [cfg (attempt edn-in #(render/validate! (render/parse (slurp edn-in))))]
+        (log "config: rendering" edn-in "-> assembler TTL")
+        {:ttl (render-ttl cfg edn-in) :descr (str "rendered from " edn-in) :edn cfg})
 
       :else
       (do (log "config: no file at" cfg-in "or" edn-in
                "— generating default in-memory dataset /" ds-name)
-          [(render/edn->ttl (default-edn) {:source "the built-in default"
-                                           :tdb2-root tdb2-root})
-           "generated default"]))))
+          {:ttl (render-ttl (default-edn) "the built-in default")
+           :descr "generated default"
+           :edn nil}))))
+
+(defn resolve-setting
+  "Env wins when explicitly set, then the EDN, then the default — and log which,
+  because 'why is the UI off' should never need a bisect."
+  [what env-value from-edn default]
+  (let [[v src] (cond env-value        [env-value "env"]
+                      (some? from-edn) [from-edn (str "fuseki.edn " what)]
+                      :else            [default "default"])]
+    (log (str (name what) ":") v (str "(from " src ")"))
+    v))
+
+(defn ui-from-edn
+  "`:ui {:enabled false}` -> \"off\". Nil when the key is absent, which is NOT the
+  same as false — this key was previously validated and then ignored, so writing
+  {:enabled false} still got you a UI. That's the exact 'config that lies' this
+  project refuses elsewhere."
+  [cfg]
+  (when-let [ui (:ui cfg)]
+    (if (:enabled ui) "on" "off")))
 
 (defn resolve-shiro
-  "Auth from a mounted shiro.ini, else generated from FUSEKI_AUTH. The EDN's
-  :auth key is honoured too, but FUSEKI_AUTH wins if explicitly set — env beats
-  file for the same reason secrets do."
-  [cfg-auth]
+  "A mounted shiro.ini is honoured untouched; otherwise generate from the
+  resolved auth mode."
+  [mode]
   (if (fs/exists? shiro-in)
     (do (log "shiro: honouring mounted" shiro-in) (slurp shiro-in))
-    (let [mode (or (when (System/getenv "FUSEKI_AUTH") auth)
-                   (some-> cfg-auth name)
-                   auth)]
+    (do
       (log "shiro: generating" (str "'" mode "'") "config")
       (case mode
         "anon"  render/shiro-anon
@@ -127,28 +162,30 @@
                       pw   (read-secret)]
                   (when-not pw
                     (die "auth is 'basic' but no FUSEKI_ADMIN_PASSWORD or FUSEKI_ADMIN_PASSWORD_FILE."))
-                  (try (render/shiro-basic user pw)
-                       (catch Exception e (die (ex-message e)))))
+                  (attempt "auth" #(render/shiro-basic user pw)))
         (die "auth must be 'anon' or 'basic', got:" mode)))))
 
 (defn -main []
   (fs/create-dirs base)
-  (let [eff-cfg        (str base "/config.effective.ttl")
-        eff-shiro      (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
-        [cfg descr]    (resolve-config)
-        ;; :auth from the EDN only applies when the EDN is the config source.
-        edn-auth       (when (and (fs/exists? edn-in) (not (fs/exists? cfg-in)))
-                         (try (:mode (:auth (render/parse (slurp edn-in)))) (catch Exception _ nil)))
-        shiro          (resolve-shiro edn-auth)]
-    (spit eff-cfg cfg)
+  (let [eff-cfg   (str base "/config.effective.ttl")
+        eff-shiro (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
+        {:keys [ttl descr edn]} (resolve-config)
+        ;; Both settings come from the ONE parsed config above. They only apply
+        ;; when the EDN is the config source — a mounted config.ttl means the EDN
+        ;; was ignored wholesale, and half-honouring an ignored file would be
+        ;; worse than ignoring it.
+        auth (resolve-setting :auth env-auth (some-> edn :auth :mode name) auth-default)
+        ui   (resolve-setting :ui   env-ui   (ui-from-edn edn)             ui-default)
+        shiro (resolve-shiro auth)]
+    (spit eff-cfg ttl)
     (spit eff-shiro shiro)
     (log "effective config ->" eff-cfg (str "(" descr ")"))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (let [launch (case ui
                    "on"  ["java" "-jar" jar]
                    "off" ["java" "-cp" jar plain-main]
-                   (die "FUSEKI_UI must be 'on' or 'off', got:" ui))]
-      (log "ui:" ui (if (= ui "off") "(headless — no UI, no admin area)" "(Fuseki's own UI + admin area)"))
+                   (die "ui must be 'on' or 'off', got:" ui))]
+      (log "ui mode:" (if (= ui "off") "headless — no UI, no admin area" "Fuseki's own UI + admin area"))
       (log "exec: fuseki-server --port=" port " --config=" eff-cfg)
       ;; exec (not run) so Fuseki is PID 1's child with clean signal handling.
       (p/exec (into launch [(str "--port=" port) (str "--config=" eff-cfg)])))))
