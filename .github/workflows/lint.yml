@@ -1,0 +1,29 @@
+name: lint
+
+# Deliberately a SEPARATE workflow from build.yml. An invalid workflow file
+# produces a run with zero jobs and the message "This run likely failed because of
+# a workflow file issue" — no line number, no reason. A lint job living inside
+# build.yml would be equally unable to run. This one still parses and still
+# reports, so you get the actual error.
+#
+# It would have caught `${{ runner.temp }}` in job-level `env:` immediately:
+#   context "runner" is not allowed here. available contexts are "github", ...
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint (workflow syntax, expression contexts, shellcheck)
+        # Pinned by digest, not :latest — a lint that silently changes rules under
+        # you is worse than no lint. Renovate can bump this.
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color
