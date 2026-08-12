@@ -7,6 +7,14 @@ script — not five layers of entrypoint bash — and **every extension point is
 documented below and exercised by the smoke test**. That tested legibility is
 the point: you can understand and trust exactly what the container does.
 
+**Our intent is that this is understandable and easy to configure — so if you
+find it isn't, that's a bug, and we'd love to know.** Confusing default,
+behaviour that surprised you, a doc that says one thing while the image does
+another, an error message that sent you the wrong way: all fair game. Open an
+issue, and **PRs are very welcome**. If you add or change an extension point,
+add its assertion to [test/smoke.sh](test/smoke.sh) — that's what stops the
+README drifting away from what the container actually does.
+
 > **Status: v0.1, published to GHCR.** One image, both postures: **Fuseki's own
 > UI ships enabled** (asserted by the smoke test), and `FUSEKI_UI=off` gives you
 > the headless server. No separate `minimal`/`full` tags — it's a runtime switch,
