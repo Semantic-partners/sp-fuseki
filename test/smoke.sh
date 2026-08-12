@@ -12,9 +12,12 @@
 #   6. anon mode fences the MUTATING admin API (you cannot delete datasets
 #      without credentials)
 #   7. FUSEKI_UI=off gives the headless server, data endpoints untouched
+#   8. TDB2 on a named volume survives a restart, and the documented mount path
+#      is writable as uid 1000 (the thing that silently breaks if the image
+#      stops pre-creating /fuseki/databases)
 #
-# Restart-persistence (TDB2) is intentionally NOT tested here: v0.1 is in-memory
-# only. It lands with the TDB2 work in v0.2 and tests volume/permission wiring.
+# v0.1 datasets are in-memory by default; 8 asserts the *mount contract* for the
+# persistent option, not TDB2 tuning/backup behaviour (that's the v0.2 work).
 #
 # Usage: IMAGE=sp-fuseki:dev test/smoke.sh
 set -euo pipefail
@@ -22,9 +25,13 @@ set -euo pipefail
 IMAGE="${IMAGE:-sp-fuseki:dev}"
 PORT="${PORT:-13030}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+VOL="sp-fuseki-smoke-$$"
 CIDS=()
 
-cleanup() { for c in "${CIDS[@]:-}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done; }
+cleanup() {
+  for c in "${CIDS[@]:-}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+  docker volume rm -f "$VOL" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -134,5 +141,32 @@ ask="$(curl -fsS -G "${base}/ds/sparql" \
 echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
   || fail "headless: ASK did not return true; got: $ask"
 pass "headless round-trip confirmed"
+
+docker rm -f "$cid" >/dev/null; CIDS=()
+
+# 8. TDB2 persistence on the documented mount path.
+echo "[8] TDB2 on a volume at /fuseki/databases survives a restart"
+cid="$(docker run -d -p "${PORT}:3030" \
+  -v "${VOL}:/fuseki/databases" \
+  -v "$(cd "$HERE/.." && pwd)/examples/config-tdb2.ttl:/fuseki/config.ttl:ro" \
+  "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+pass "booted with a volume mounted at /fuseki/databases"
+
+# If the mount point were root-owned, TDB2 would have died before this point with
+# a misleading "No such file or directory" — so a successful write is the assertion.
+curl -fsS -X POST -H 'Content-Type: text/turtle' \
+  --data-binary "@${HERE}/sample.ttl" "${base}/ds/data?default" >/dev/null \
+  || fail "POST turtle to TDB2-backed /ds/data failed (mount not writable as uid 1000?)"
+pass "wrote to the TDB2 dataset"
+
+docker restart "$cid" >/dev/null
+wait_ping "$base"
+ask="$(curl -fsS -G "${base}/ds/sparql" \
+  --data-urlencode 'query=ASK { <http://example.org/s> <http://example.org/p> <http://example.org/o> }' \
+  -H 'Accept: application/sparql-results+json')"
+echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
+  || fail "triple did not survive restart — persistence broken; got: $ask"
+pass "data survived a container restart"
 
 echo "== smoke PASSED =="

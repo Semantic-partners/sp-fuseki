@@ -246,13 +246,19 @@ everything else on," not "can we afford weeks."
 
 ## Milestones
 
-- **v0.1** — minimal + `full` (tier-1 UI) images, bb entrypoint honouring mounted
-  `config.ttl`/`shiro.ini` + effective-config dump, env/`*_FILE` secrets,
-  non-root, healthcheck, multi-arch (6.x), GHCR publish, two-axis tags, scan +
-  sign + SBOM, packaging smoke test, README + documented extension points.
-- **v0.2** — `tdb2` storage (+ documented volume/UID contract), `:basic` auth,
+- **v0.1** — one image, UI on by default + `FUSEKI_UI=off` for headless (no
+  variant tags), bb entrypoint honouring mounted `config.ttl`/`shiro.ini` +
+  effective-config dump, env/`*_FILE` secrets, `:basic` auth with the mutating
+  admin API fenced under `:anon`, non-root, healthcheck, multi-arch (6.x), GHCR
+  publish, Jena-version matrix + two-axis tags, scan + sign + SBOM, packaging
+  smoke test, README + documented extension points.
+  **Also landed early:** TDB2 works today via a mounted config — the volume/UID
+  contract (`/fuseki/databases`, uid 1000, ownership-inheritance trap) is
+  documented in the README and asserted by smoke §8.
+- **v0.2** — TDB2 *beyond* the mount contract (backup/compact story, tuning),
   reasoner options, optional EDN/aero convenience layer (decided on merits),
-  CodeMirror web-component UI variant (tier 2), Renovate wired.
+  CodeMirror web-component UI variant (tier 2).
+  Renovate: **wired in v0.1**, plus a weekly upstream-check workflow.
 - **later** — Bet B (bespoke UI tier 3) as its own decision, slotting into the
   same `:ui` seam.
 
