@@ -1,0 +1,61 @@
+;; fuseki.edn — DESIGN SKETCH for the EDN/aero convenience layer. NOT IMPLEMENTED.
+;;
+;; ┌─ Status ────────────────────────────────────────────────────────────────┐
+;; │ Nothing reads this file today. The entrypoint takes a mounted assembler │
+;; │ config.ttl (+ shiro.ini) and env vars — see the README's extension      │
+;; │ points. Mounting this file has NO effect.                               │
+;; └─────────────────────────────────────────────────────────────────────────┘
+;;
+;; It is kept because it is the target shape, not a leftover: the intent is that
+;; the entrypoint RENDERS config.ttl + shiro.ini from this. RFC §"Config" holds
+;; the line that matters — if the EDN layer lands it is a *generator over the
+;; assembler TTL*, with raw-TTL passthrough as the escape hatch, never a
+;; replacement. ASSESSMENT §9 defers it to v0.2 to be decided on merits (the
+;; xkcd-927 risk of being the Nth config format), and decoupled from the choice
+;; of babashka, which stands either way.
+;;
+;; Open question to settle before implementing (ASSESSMENT §"which wins"): if
+;; BOTH a raw config.ttl and a fuseki.edn are mounted, which wins? The proposed
+;; answer is that a mounted config.ttl always wins untouched, and the EDN only
+;; renders when no config.ttl is present — consistent with "you mount config, we
+;; honour it".
+;;
+;; This example mirrors the training-lab's two-dataset setup
+;; (see training-data/.devcontainer/fuseki/config.ttl), which v0.1 must
+;; reproduce byte-for-behaviour as the dogfood acceptance test.
+;;
+;; Keys below marked (v0.2) describe capabilities the image doesn't have yet;
+;; the rest map onto things it already does, listed alongside their current
+;; equivalent so the sketch stays honest about the gap.
+
+{;; -> FUSEKI_PORT / FUSEKI_BASE today
+ :server   {:port 3030 :base "/fuseki"}
+
+ ;; -> FUSEKI_AUTH today (:anon | :basic). Note the shipped :anon posture also
+ ;; fences the MUTATING admin API; a renderer must reproduce that, not just
+ ;; emit `/** = anon`.
+ :auth     {:mode :anon}
+
+ ;; (v0.2) no equivalent — prefixes are hand-written in the TTL today
+ :prefixes {:ex  "http://example.org/"
+            :geo "http://geo.org/"}
+
+ :datasets [{:name "training"
+             ;; :mem today; :tdb2 needs tdb2:location under a writable mount —
+             ;; /fuseki/databases. A renderer must emit that path, not just the
+             ;; storage type. See README -> Persistence.
+             :storage :mem                ; :mem | :tdb2
+             :endpoints #{:query :update :gsp-rw}}
+            {:name "training-inferred"
+             :storage :mem
+             :reasoner :none              ; (v0.2) :none | :rdfs | :owl-micro | …
+             :endpoints #{:query :gsp-rw}}]
+
+ ;; (v0.2) no equivalent yet — would render a SERVICE-based assembler entry
+ :federation [{:name "dbpedia" :url "https://dbpedia.org/sparql"}]
+
+ ;; -> FUSEKI_UI today, and it defaults ON: Fuseki's own UI ships enabled and
+ ;; `off` selects the headless server. (This key previously read
+ ;; `{:enabled false}`, which made the image look like it had no UI. It always
+ ;; had one.)
+ :ui {:enabled true}}
