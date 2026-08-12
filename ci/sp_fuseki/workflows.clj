@@ -247,7 +247,12 @@
                          :merge-multiple true
                          :path "/tmp/digests"))
              (m :uses "docker/setup-buildx-action@v3")
-             (m :uses "sigstore/cosign-installer@v3")
+             ;; Gated identically to the signing step below. Installing cosign on a
+             ;; PR downloaded a release we never use, and that download failed a
+             ;; merge leg with exit 56 — an avoidable network call is an avoidable
+             ;; flake. workflows-test asserts the two gates stay equal.
+             (m :uses "sigstore/cosign-installer@v3"
+                :if not-pr)
              (m :uses "docker/login-action@v3"
                 :with (m :registry "${{ env.REGISTRY }}"
                          :username "${{ github.actor }}"

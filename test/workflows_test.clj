@@ -76,6 +76,15 @@
       (is (some? s) (str "no step matching " needle))
       (is (= w/not-pr (:if s)) (str needle " should be gated to non-PR events")))))
 
+(deftest cosign-installer-shares-the-signing-gate
+  ;; One gated and the other not is the bug: we installed cosign on every PR,
+  ;; never signed there, and a failed cosign download took out a merge leg.
+  (let [installer (step-named :merge "cosign-installer")
+        signer    (step-named :merge "cosign sign")]
+    (is (some? installer))
+    (is (= (:if signer) (:if installer))
+        "installing cosign must be conditioned exactly like signing with it")))
+
 (deftest tests-gate-publishing
   (is (some #{"test"} (:needs (job :publish)))
       "publish must depend on test, or a red suite still ships an image"))
