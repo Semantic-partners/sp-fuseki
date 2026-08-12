@@ -334,8 +334,18 @@ of Jena versions** multi-arch, smoke-tests each, pushes to GHCR with two-axis ta
 (`<jena>-<sp-build>`, `<jena>`, and `latest` on the default leg only), generates an
 SBOM, scans (Trivy — see *Vulnerability posture* above for what that blocks and
 what it merely reports), and signs (cosign keyless). The default leg is whatever
-`image/Dockerfile` pins; older versions we still publish are listed in
-`EXTRA_JENA`. There is no cron — builds run on bumps. Renovate watches Jena via
+`image/Dockerfile` pins; additional older versions can be published alongside it by
+listing them in `EXTRA_JENA`, which is currently **empty**.
+
+We published 6.1.0 briefly and stopped: the scan gate found two HIGH findings with
+fixes available in that image's bundled jars — `shiro-core` 2.1.0
+([CVE-2026-49268](https://avd.aquasec.com/nvd/cve-2026-49268)) and `jetty-security`
+12.1.8 ([CVE-2026-10050](https://avd.aquasec.com/nvd/cve-2026-10050)), both patched
+in what Jena 6.2.0 ships. An older leg is only worth publishing if it can be kept
+patched, and that one can't be without Apache re-releasing it. So there is one
+supported Jena at a time, and it is the current one.
+
+There is no cron — builds run on bumps. Renovate watches Jena via
 Maven Central, and [upstream-check.yml](.github/workflows/upstream-check.yml) runs
 weekly against `archive.apache.org` and opens an issue if a newer Fuseki exists.
 **Private first**;

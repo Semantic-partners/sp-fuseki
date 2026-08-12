@@ -106,7 +106,17 @@
      ;; the matrix context — and even if it could, `runs-on` is resolved before
      ;; steps run, so a skipped-step job would still be scheduled onto the Mac.
      ;; Removing the arch from the list is the only way the job never exists.
-     :env (m :EXTRA_JENA "6.1.0"
+     ;; EXTRA_JENA is EMPTY on purpose. It held 6.1.0 until the CVE gate found two
+     ;; HIGH findings WITH fixes available in that image's bundled jars —
+     ;; shiro-core 2.1.0 (CVE-2026-49268, LDAP injection into a DN) and
+     ;; jetty-security 12.1.8 (CVE-2026-10050, Digest auth). Both are fixed in the
+     ;; jars Jena 6.2.0 ships. The argument for the matrix was that older legs get
+     ;; MAINTAINED; a leg we can't patch is being kept warm, not maintained — and
+     ;; shipping a fixable CVE in the auth layer undercuts the whole claim.
+     ;;
+     ;; The mechanism stays: add a version here to publish it alongside the
+     ;; Dockerfile's pin, and the gate will tell you if it's patchable.
+     :env (m :EXTRA_JENA ""
              :SAME_REPO (str "${{ " same-repo-or-push " }}"))
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
