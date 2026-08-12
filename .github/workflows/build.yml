@@ -141,11 +141,24 @@ jobs:
             echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker"
           } >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Deliberately NOT docker/login-action. On the macOS runner `docker login`
+      # hands the credential to Docker Desktop's Keychain helper, which fails with
+      # "User interaction is not allowed. (-25308)" without an interactive session
+      # — and the macOS CLI selects that helper by DEFAULT, so an empty
+      # DOCKER_CONFIG doesn't avoid it. Writing the auth entry ourselves uses no
+      # helper at all. The token is job-scoped and dies with the temp dir.
+      - name: Write registry credentials (no credential helper)
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          AUTH="$(printf '%s:%s' "$GHCR_USER" "$GHCR_TOKEN" | base64 | tr -d '\n')"
+          umask 077
+          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$AUTH" \
+            > "$DOCKER_CONFIG/config.json"
+          echo "wrote auth for $REGISTRY to $DOCKER_CONFIG/config.json"
 
       - name: Build + push by digest
         id: build
