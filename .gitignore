@@ -3,10 +3,11 @@
 /build/
 *.tar.gz
 
-# Rendered config produced by the entrypoint at runtime
+# Effective config produced by the entrypoint at runtime (names must match
+# entrypoint.clj — it writes these under FUSEKI_BASE)
 /run/
-config.rendered.ttl
-shiro.rendered.ini
+config.effective.ttl
+shiro.ini
 
 # Local env
 .env
@@ -14,3 +15,7 @@ shiro.rendered.ini
 
 # OS / editor
 .DS_Store
+
+# Clojure tooling caches (clj-kondo/clojure-lsp, created by editors and bb)
+/.clj-kondo/
+/.lsp/

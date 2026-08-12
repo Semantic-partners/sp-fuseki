@@ -84,8 +84,12 @@ people choose it because they can *understand and trust* it. This is pure SP
   non-Java piece in the build.
 - **Defaults:** non-root user; healthcheck on `/$/ping`; auth `:anon` for
   throwaway, `:basic` opt-in; in-memory or TDB2 per dataset.
-- **Variants (tags):** `minimal` (server only) and `full` (keeps Fuseki's own
-  UI). Tags carry the Jena version + variant; immutable version tags + a moving
+- **Variants (tags):** ~~`minimal` (server only) and `full` (keeps Fuseki's own
+  UI)~~ — **superseded in v0.1.** Both servers ship in the one `fuseki-server.jar`
+  (its `Main-Class` is the UI+admin build; `FusekiServerPlainCmd` is headless), so
+  this is a runtime switch, `FUSEKI_UI=on|off`, not a tag axis. A variant axis
+  would have doubled every multi-arch build leg to select a different main class.
+  Tags carry the Jena version + sp-build only; immutable version tags + a moving
   `latest`.
 
 ### Config: TTL-first, respected, inspectable
@@ -143,7 +147,7 @@ A UI is not one bet, and the RFC originally over-stated the cost. The tiers:
 
 | Tier | What | Cost | Status |
 |---|---|---|---|
-| **1. Keep Fuseki's own UI** | `full` variant that doesn't strip the webapp Fuseki ships | ~zero | v0.1/v0.2 |
+| **1. Keep Fuseki's own UI** | Don't strip the UI Fuseki ships — `FUSEKI_UI=on`, the default (no `full` tag; see *Variants* above) | ~zero, and it was already there | **shipped in v0.1**, smoke-asserted |
 | **2. Thin CodeMirror web component** | SPARQL editor + **results-as-data** (raw/tabular), built fresh on the CodeMirror config — framework-free, embeddable | ~the old YASGUI-reskin budget, but clean (no wrapper debt) | v0.2 variant |
 | **3. Fuller bespoke UI** | tier 2 + prefixes / history; possibly a standalone app | more than tier 2; gate is *opportunity cost*, not build difficulty | Bet B, separate |
 

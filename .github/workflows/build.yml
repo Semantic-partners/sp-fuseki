@@ -74,6 +74,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Sequential on purpose. The legs differ only in the Jena layer, so they push
+      # identical base blobs; racing them made GHCR 403 a blob HEAD mid-upload and
+      # fail the 6.1.0 leg. Same runner minutes, just not concurrent.
+      max-parallel: 1
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
     permissions:

@@ -15,6 +15,7 @@
 ;;   FUSEKI_ADMIN_USER            basic-auth user               (default admin)
 ;;   FUSEKI_ADMIN_PASSWORD        basic-auth secret (env)
 ;;   FUSEKI_ADMIN_PASSWORD_FILE   basic-auth secret (file; e.g. a Docker secret)
+;;   FUSEKI_UI                    on | off                      (default on)
 ;;   FUSEKI_JAR                   fuseki-server.jar             (default /opt/fuseki/fuseki-server.jar)
 ;;
 ;; Config resolution (config-respecting, never silently regenerated):
@@ -39,7 +40,14 @@
 (def port     (env "FUSEKI_PORT"    "3030"))
 (def ds-name  (env "FUSEKI_DATASET" "ds"))
 (def auth     (env "FUSEKI_AUTH"    "anon"))
+(def ui       (env "FUSEKI_UI"      "on"))
 (def jar      (env "FUSEKI_JAR"     "/opt/fuseki/fuseki-server.jar"))
+
+;; The one jar carries both servers. Its manifest Main-Class is the UI + admin
+;; build (what `java -jar` gets you); this is the headless one, same class the
+;; dist's own `fuseki-plain` script selects. So FUSEKI_UI is a runtime choice —
+;; no second image, no extra build leg.
+(def plain-main "org.apache.jena.fuseki.main.cmds.FusekiServerPlainCmd")
 
 (defn default-config []
   (format "# sp-fuseki: GENERATED default — no config mounted at %s.
@@ -67,11 +75,26 @@
 
 (def shiro-anon
   "# sp-fuseki: GENERATED — anonymous (throwaway/lab). NOT for exposed use.
+#
+# Data endpoints are open; the MUTATING admin API is not. `POST /$/datasets`
+# creates datasets and `DELETE /$/datasets/{name}` drops them, so leaving all of
+# /$/ anonymous means anyone who can reach the port can delete your data. Shiro
+# matches on path, not method, so fencing the mutation means fencing the path:
+# with no [users] defined, authcBasic is a permanent 401 and admin is simply
+# closed. Set FUSEKI_AUTH=basic to actually use the admin API.
+#
+# Read-only admin stays open so the UI (and your monitoring) still reports.
 [main]
 ssl.enabled = false
 [users]
 [roles]
 [urls]
+/$/ping = anon
+/$/server = anon
+/$/stats = anon
+/$/stats/** = anon
+/$/metrics = anon
+/$/** = authcBasic
 /** = anon
 ")
 
@@ -81,12 +104,17 @@ ssl.enabled = false
     (when-not pw
       (die "FUSEKI_AUTH=basic but no FUSEKI_ADMIN_PASSWORD or FUSEKI_ADMIN_PASSWORD_FILE."))
     (format "# sp-fuseki: GENERATED — basic auth, all endpoints require login.
+#
+# /$/ping is the one exception, and it has to be: the image's HEALTHCHECK curls
+# it with no credentials, so gating it makes every basic-auth container report
+# unhealthy forever. Ping returns a timestamp and nothing else.
 [main]
 ssl.enabled = false
 [users]
 %s = %s
 [roles]
 [urls]
+/$/ping = anon
 /** = authcBasic
 " user pw)))
 
@@ -115,8 +143,13 @@ ssl.enabled = false
     (spit eff-shiro shiro)
     (log "effective config ->" eff-cfg)
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
-    (log "exec: fuseki-server --port=" port " --config=" eff-cfg)
-    ;; exec (not run) so Fuseki is PID 1's child with clean signal handling.
-    (p/exec ["java" "-jar" jar (str "--port=" port) (str "--config=" eff-cfg)])))
+    (let [launch (case ui
+                   "on"  ["java" "-jar" jar]
+                   "off" ["java" "-cp" jar plain-main]
+                   (die "FUSEKI_UI must be 'on' or 'off', got:" ui))]
+      (log "ui:" ui (if (= ui "off") "(headless — no UI, no admin area)" "(Fuseki's own UI + admin area)"))
+      (log "exec: fuseki-server --port=" port " --config=" eff-cfg)
+      ;; exec (not run) so Fuseki is PID 1's child with clean signal handling.
+      (p/exec (into launch [(str "--port=" port) (str "--config=" eff-cfg)])))))
 
 (-main)

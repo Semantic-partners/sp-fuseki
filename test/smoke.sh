@@ -7,6 +7,11 @@
 #   3. zero-config default dataset: POST turtle -> query it back
 #   4. config-respecting: a mounted config.ttl is honoured (its datasets appear;
 #      the generated default does not)
+#   5. Fuseki's own UI is served (we ship it — this is the assertion that stops
+#      "does it have a UI?" from ever being a docs question again)
+#   6. anon mode fences the MUTATING admin API (you cannot delete datasets
+#      without credentials)
+#   7. FUSEKI_UI=off gives the headless server, data endpoints untouched
 #
 # Restart-persistence (TDB2) is intentionally NOT tested here: v0.1 is in-memory
 # only. It lands with the TDB2 work in v0.2 and tests volume/permission wiring.
@@ -74,5 +79,60 @@ pass "/training present (mounted config used)"
 code="$(curl -s -o /dev/null -w '%{http_code}' -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
 [ "$code" = "404" ] || fail "expected generated default /ds to be absent (404), got $code"
 pass "generated default /ds absent — config respected, not merged"
+
+docker rm -f "$cid" >/dev/null; CIDS=()
+
+# 5 + 6. UI is served; anon mode fences the mutating admin API.
+echo "[5] Fuseki's own UI is served"
+cid="$(docker run -d -p "${PORT}:3030" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+
+root="$(curl -fsS "$base/")" || fail "GET / failed — no UI served"
+echo "$root" | grep -q 'Apache Jena Fuseki UI' \
+  || fail "GET / did not look like the Fuseki UI shell; got: $(echo "$root" | head -c 200)"
+pass "/ serves the Fuseki UI shell"
+
+# The shell is useless if its bundle 404s, so assert the asset it references.
+asset="$(echo "$root" | grep -oE 'static/[A-Za-z0-9._-]+\.js' | head -1)"
+[ -n "$asset" ] || fail "UI shell referenced no /static/*.js bundle"
+code="$(curl -s -o /dev/null -w '%{http_code}' "${base}/${asset}")"
+[ "$code" = "200" ] || fail "UI bundle ${asset} not served (got $code)"
+pass "UI bundle ${asset} served"
+
+curl -fsS "${base}/\$/server" | grep -q '"datasets"' \
+  || fail "/\$/server did not report datasets — UI has no server info to show"
+pass "/\$/server reports datasets"
+
+echo "[6] anon mode fences the mutating admin API"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/\$/datasets" \
+  --data 'dbName=smoke-should-not-exist&dbType=mem')"
+[ "$code" = "401" ] || fail "anon POST /\$/datasets should be 401, got $code (admin API is open!)"
+pass "POST /\$/datasets -> 401"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${base}/\$/datasets/ds")"
+[ "$code" = "401" ] || fail "anon DELETE /\$/datasets/ds should be 401, got $code (your data is deletable!)"
+pass "DELETE /\$/datasets/ds -> 401"
+# Fencing admin must not have fenced the data endpoints.
+curl -fsS -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "data endpoint /ds/sparql broke while fencing admin"
+pass "data endpoints still anonymous"
+
+docker rm -f "$cid" >/dev/null; CIDS=()
+
+# 7. headless variant — same image, runtime switch.
+echo "[7] FUSEKI_UI=off serves no UI, data endpoints unaffected"
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_UI=off "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$base/")"
+[ "$code" != "200" ] || fail "FUSEKI_UI=off still served a UI at / (got 200)"
+pass "/ not served (got $code)"
+curl -fsS -X POST -H 'Content-Type: text/turtle' \
+  --data-binary "@${HERE}/sample.ttl" "${base}/ds/data?default" >/dev/null \
+  || fail "headless: POST turtle to /ds/data failed"
+ask="$(curl -fsS -G "${base}/ds/sparql" \
+  --data-urlencode 'query=ASK { <http://example.org/s> <http://example.org/p> <http://example.org/o> }' \
+  -H 'Accept: application/sparql-results+json')"
+echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
+  || fail "headless: ASK did not return true; got: $ask"
+pass "headless round-trip confirmed"
 
 echo "== smoke PASSED =="
