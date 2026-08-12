@@ -1,0 +1,61 @@
+;; fuseki.edn — the whole server as data. Rendered to assembler TTL at boot.
+;;
+;; Mount at /fuseki/fuseki.edn (or set FUSEKI_EDN):
+;;
+;;   docker run --rm -p 3030:3030 \
+;;     -v "$PWD/examples/fuseki.edn:/fuseki/fuseki.edn:ro" \
+;;     -v sp-fuseki-data:/fuseki/databases \
+;;     ghcr.io/semantic-partners/sp-fuseki
+;;
+;; A mounted config.ttl always wins: bring TTL and no EDN gets in your way. This
+;; is the other path, for when you'd rather not hand-write assembler syntax.
+;; The rendered result is written to $FUSEKI_BASE/config.effective.ttl — go and
+;; read it, that's the point.
+;;
+;; The contract these keys obey is documented in test/render_test.clj.
+
+{;; Optional. Defaults to 3030 / /fuseki (FUSEKI_PORT also works).
+ :server {:port 3030}
+
+ ;; :anon (lab; data open, MUTATING admin API fenced) | :basic (login required).
+ ;; FUSEKI_AUTH wins if set. The password never lives here — see #env below.
+ :auth {:mode :anon}
+
+ ;; Declared once, emitted into the rendered TTL. Hand-written TTL makes you
+ ;; repeat these in every file.
+ :prefixes {:ex  "http://example.org/"
+            :geo "http://geo.org/"}
+
+ :datasets [;; In-memory: fast, gone on restart.
+            {:name "training"
+             :storage :mem
+             :endpoints #{:query :update :gsp-rw}}
+
+            ;; Persistent: TDB2 under /fuseki/databases/<name>. Mount a volume
+            ;; there — the location is emitted for you, so the "IOException: No
+            ;; such file or directory" permission trap can't bite.
+            {:name "kb"
+             :storage :tdb2
+             :endpoints #{:query :update :gsp-rw}}
+
+            ;; Inference: an RDFS reasoner over an in-memory base graph. Queries
+            ;; see entailed triples, not just the ones you loaded.
+            ;; :none | :rdfs | :owl-micro
+            ;; Note :gsp-rw — you need write access to load the base data. With
+            ;; :gsp-r you'd get a read-only dataset with nothing in it.
+            {:name "training-inferred"
+             :storage :mem
+             :reasoner :rdfs
+             :endpoints #{:query :gsp-rw}}]
+
+ ;; Fuseki's own UI + admin area. FUSEKI_UI=off gives the headless server.
+ :ui {:enabled true}}
+
+;; Secrets, without putting a secret in the file:
+;;
+;;   :auth {:mode :basic :password #env "FUSEKI_ADMIN_PASSWORD"}
+;;   :auth {:mode :basic :password #file "/run/secrets/fuseki-admin"}
+;;
+;; Both fail loudly at boot if unset/missing, rather than booting with an empty
+;; password. #file trims trailing newlines, which is what `echo secret > file`
+;; and most secret mounts give you.

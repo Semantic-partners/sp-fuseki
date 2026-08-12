@@ -121,13 +121,27 @@ in-memory datasets and a handful of endpoints — e.g.:
   half-configured.
 
 A higher-level **EDN/aero convenience layer** (`fuseki.edn`, the whole server as
-data) is attractive but is **deferred to v0.2** and decided on its own merits —
-it would be the Nth config standard, and the dogfood needs none of it. When/if
-added, it is a *generator over the assembler TTL* with the passthrough above as
-the escape hatch, never a replacement. The sketch lives in
-[issue #2](https://github.com/Semantic-partners/sp-fuseki/issues/2), not in
-`examples/` — an unimplemented shape sitting next to working examples reads as
-something you can mount, which is exactly how it misled once already.
+data) ~~is deferred to v0.2~~ — **implemented**, as a *generator over the
+assembler TTL* with the passthrough above as the escape hatch, never a
+replacement. [Issue #2](https://github.com/Semantic-partners/sp-fuseki/issues/2)
+holds the design discussion; [examples/fuseki.edn](../examples/fuseki.edn) is now
+a working config, not a sketch.
+
+Notes on how it landed, because two of them differ from the sketch:
+
+- **One renderer, not two.** The zero-config default is an EDN value rendered by
+  the same code path as a user's `fuseki.edn`. The old hand-rolled `format`
+  string for the default is gone. Two TTL generators would have drifted, exactly
+  as the shiro templates nearly did.
+- **`#env`/`#file` reader tags, not aero.** A dependency-free `clojure.edn`
+  `:readers` map covers the sugar we actually wanted; pulling aero into a bb
+  script buys little else.
+- **`:federation` is rejected, loudly, as unimplemented** rather than silently
+  dropped — a config that quietly ignores a key is a config that lies.
+- **`:reasoner` with `:tdb2` is refused**: inference over a persistent store is a
+  decision we haven't made, and emitting plausible TTL for it would be guessing.
+- The renderer is pure and unit-tested ([test/render_test.clj](../test/render_test.clj));
+  the container behaviour is smoke-tested (§9–11).
 
 **Decided (both paths are first-class):** bring a `config.ttl` and it is simply
 used, untouched — no EDN anywhere in your way. Embrace the EDN and you are
@@ -269,9 +283,11 @@ everything else on," not "can we afford weeks."
   contract (`/fuseki/databases`, uid 1000, ownership-inheritance trap) is
   documented in the README and asserted by smoke §8.
 - **v0.2** — TDB2 *beyond* the mount contract (backup/compact story, tuning),
-  reasoner options, optional EDN/aero convenience layer (decided on merits),
   CodeMirror web-component UI variant (tier 2).
-  Renovate: **wired in v0.1**, plus a weekly upstream-check workflow.
+  **Pulled into v0.1:** the EDN config layer and `:reasoner` options (both
+  implemented and tested); Renovate, plus a weekly upstream-check workflow.
+  **Still open from the sketch:** `:federation` (rejected loudly for now), and
+  inference over `:tdb2`.
 - **later** — Bet B (bespoke UI tier 3) as its own decision, slotting into the
   same `:ui` seam.
 

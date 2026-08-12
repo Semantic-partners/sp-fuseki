@@ -5,9 +5,14 @@
 ;; here is magic you have to reverse-engineer. The job: resolve config + shiro,
 ;; write the *effective* files where you can read them, then exec Fuseki.
 ;;
+;; Rendering lives in sp_fuseki/render.clj (pure, unit-tested). There is exactly
+;; ONE TTL generator: the zero-config default is an EDN value rendered by the
+;; same code path as a user's fuseki.edn, so the two cannot drift apart.
+;;
 ;; Environment (the extension points):
 ;;   FUSEKI_BASE                  runtime/data dir              (default /fuseki/run)
 ;;   FUSEKI_CONFIG                assembler config.ttl          (default /fuseki/config.ttl)
+;;   FUSEKI_EDN                   fuseki.edn (rendered to TTL)  (default /fuseki/fuseki.edn)
 ;;   FUSEKI_SHIRO                 shiro.ini                     (default /fuseki/shiro.ini)
 ;;   FUSEKI_PORT                  listen port                   (default 3030)
 ;;   FUSEKI_DATASET               default ds name (no config)   (default ds)
@@ -16,17 +21,22 @@
 ;;   FUSEKI_ADMIN_PASSWORD        basic-auth secret (env)
 ;;   FUSEKI_ADMIN_PASSWORD_FILE   basic-auth secret (file; e.g. a Docker secret)
 ;;   FUSEKI_UI                    on | off                      (default on)
+;;   FUSEKI_TDB2_ROOT             where :tdb2 datasets live      (default /fuseki/databases)
 ;;   FUSEKI_JAR                   fuseki-server.jar             (default /opt/fuseki/fuseki-server.jar)
 ;;
 ;; Config resolution (config-respecting, never silently regenerated):
-;;   - FUSEKI_CONFIG mounted  -> honoured untouched
-;;   - otherwise              -> a minimal in-memory dataset is generated
-;;   - the effective config + shiro are always written under FUSEKI_BASE and the
-;;     paths logged, so "what did it actually run" is never a mystery.
+;;   1. FUSEKI_CONFIG mounted -> honoured untouched. If a fuseki.edn is ALSO
+;;      mounted, the TTL wins and we log that the EDN was ignored — conflicting
+;;      sources of truth must never be a silent surprise.
+;;   2. FUSEKI_EDN mounted    -> validated and rendered to TTL.
+;;   3. neither               -> a minimal in-memory dataset, via the same renderer.
+;;   The effective config + shiro are always written under FUSEKI_BASE and the
+;;   paths logged, so "what did it actually run" is never a mystery.
 
 (require '[babashka.fs :as fs]
          '[babashka.process :as p]
-         '[clojure.string :as str])
+         '[clojure.string :as str]
+         '[sp-fuseki.render :as render])
 
 (defn env [k d] (or (System/getenv k) d))
 (defn log [& xs] (binding [*out* *err*] (apply println "[sp-fuseki]" xs)))
@@ -34,14 +44,16 @@
   (binding [*out* *err*] (apply println "[sp-fuseki] FATAL:" xs))
   (System/exit 1))
 
-(def base     (env "FUSEKI_BASE"    "/fuseki/run"))
-(def cfg-in   (env "FUSEKI_CONFIG"  "/fuseki/config.ttl"))
-(def shiro-in (env "FUSEKI_SHIRO"   "/fuseki/shiro.ini"))
-(def port     (env "FUSEKI_PORT"    "3030"))
-(def ds-name  (env "FUSEKI_DATASET" "ds"))
-(def auth     (env "FUSEKI_AUTH"    "anon"))
-(def ui       (env "FUSEKI_UI"      "on"))
-(def jar      (env "FUSEKI_JAR"     "/opt/fuseki/fuseki-server.jar"))
+(def base      (env "FUSEKI_BASE"       "/fuseki/run"))
+(def cfg-in    (env "FUSEKI_CONFIG"     "/fuseki/config.ttl"))
+(def edn-in    (env "FUSEKI_EDN"        "/fuseki/fuseki.edn"))
+(def shiro-in  (env "FUSEKI_SHIRO"      "/fuseki/shiro.ini"))
+(def port      (env "FUSEKI_PORT"       "3030"))
+(def ds-name   (env "FUSEKI_DATASET"    "ds"))
+(def auth      (env "FUSEKI_AUTH"       "anon"))
+(def ui        (env "FUSEKI_UI"         "on"))
+(def tdb2-root (env "FUSEKI_TDB2_ROOT"  "/fuseki/databases"))
+(def jar       (env "FUSEKI_JAR"        "/opt/fuseki/fuseki-server.jar"))
 
 ;; The one jar carries both servers. Its manifest Main-Class is the UI + admin
 ;; build (what `java -jar` gets you); this is the headless one, same class the
@@ -49,20 +61,12 @@
 ;; no second image, no extra build leg.
 (def plain-main "org.apache.jena.fuseki.main.cmds.FusekiServerPlainCmd")
 
-(defn default-config []
-  (format "# sp-fuseki: GENERATED default — no config mounted at %s.
-# One in-memory dataset '/%s' with query + update + gsp-rw. Mount your own
-# config.ttl (at FUSEKI_CONFIG) to override; it will be honoured untouched.
-@prefix fuseki: <http://jena.apache.org/fuseki#> .
-@prefix ja:     <http://jena.hpl.hp.com/2005/11/Assembler#> .
-
-[] a fuseki:Service ;
-   fuseki:name \"%s\" ;
-   fuseki:endpoint [ fuseki:operation fuseki:query  ; fuseki:name \"sparql\" ] ;
-   fuseki:endpoint [ fuseki:operation fuseki:update ; fuseki:name \"update\" ] ;
-   fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name \"data\" ] ;
-   fuseki:dataset [ a ja:RDFDataset ; ja:defaultGraph [ a ja:MemoryModel ] ] .
-" cfg-in ds-name ds-name))
+(defn default-edn
+  "The zero-config default, as data. Rendered by the same code as a user's EDN."
+  []
+  {:datasets [{:name ds-name
+               :storage :mem
+               :endpoints #{:query :update :gsp-rw}}]})
 
 (defn read-secret []
   (let [pw  (System/getenv "FUSEKI_ADMIN_PASSWORD")
@@ -73,75 +77,72 @@
       pw pw
       :else nil)))
 
-(def shiro-anon
-  "# sp-fuseki: GENERATED — anonymous (throwaway/lab). NOT for exposed use.
-#
-# Data endpoints are open; the MUTATING admin API is not. `POST /$/datasets`
-# creates datasets and `DELETE /$/datasets/{name}` drops them, so leaving all of
-# /$/ anonymous means anyone who can reach the port can delete your data. Shiro
-# matches on path, not method, so fencing the mutation means fencing the path:
-# with no [users] defined, authcBasic is a permanent 401 and admin is simply
-# closed. Set FUSEKI_AUTH=basic to actually use the admin API.
-#
-# Read-only admin stays open so the UI (and your monitoring) still reports.
-[main]
-ssl.enabled = false
-[users]
-[roles]
-[urls]
-/$/ping = anon
-/$/server = anon
-/$/stats = anon
-/$/stats/** = anon
-/$/metrics = anon
-/$/** = authcBasic
-/** = anon
-")
+(defn render-edn
+  "Parse + validate + render an EDN config, turning any failure into a clear,
+  single-line FATAL rather than a Clojure stack trace."
+  [text source]
+  (try
+    (render/edn->ttl (render/parse text) {:source source :tdb2-root tdb2-root})
+    (catch Exception e
+      (die (str source ": " (ex-message e))))))
 
-(defn shiro-basic []
-  (let [user (env "FUSEKI_ADMIN_USER" "admin")
-        pw   (read-secret)]
-    (when-not pw
-      (die "FUSEKI_AUTH=basic but no FUSEKI_ADMIN_PASSWORD or FUSEKI_ADMIN_PASSWORD_FILE."))
-    (format "# sp-fuseki: GENERATED — basic auth, all endpoints require login.
-#
-# /$/ping is the one exception, and it has to be: the image's HEALTHCHECK curls
-# it with no credentials, so gating it makes every basic-auth container report
-# unhealthy forever. Ping returns a timestamp and nothing else.
-[main]
-ssl.enabled = false
-[users]
-%s = %s
-[roles]
-[urls]
-/$/ping = anon
-/** = authcBasic
-" user pw)))
+(defn resolve-config
+  "Returns [ttl description]. See the resolution order in the header."
+  []
+  (let [have-ttl (fs/exists? cfg-in)
+        have-edn (fs/exists? edn-in)]
+    (cond
+      have-ttl
+      (do (when have-edn
+            (log "NOTE:" edn-in "is present but IGNORED —" cfg-in
+                 "wins. A mounted config.ttl is always honoured untouched."))
+          (log "config: honouring mounted" cfg-in)
+          [(slurp cfg-in) (str "mounted " cfg-in)])
 
-(defn resolve-config []
-  (if (fs/exists? cfg-in)
-    (do (log "config: honouring mounted" cfg-in) (slurp cfg-in))
-    (do (log "config: no file at" cfg-in "— generating default in-memory dataset /" ds-name)
-        (default-config))))
+      have-edn
+      (do (log "config: rendering" edn-in "-> assembler TTL")
+          [(render-edn (slurp edn-in) edn-in) (str "rendered from " edn-in)])
 
-(defn resolve-shiro []
+      :else
+      (do (log "config: no file at" cfg-in "or" edn-in
+               "— generating default in-memory dataset /" ds-name)
+          [(render/edn->ttl (default-edn) {:source "the built-in default"
+                                           :tdb2-root tdb2-root})
+           "generated default"]))))
+
+(defn resolve-shiro
+  "Auth from a mounted shiro.ini, else generated from FUSEKI_AUTH. The EDN's
+  :auth key is honoured too, but FUSEKI_AUTH wins if explicitly set — env beats
+  file for the same reason secrets do."
+  [cfg-auth]
   (if (fs/exists? shiro-in)
     (do (log "shiro: honouring mounted" shiro-in) (slurp shiro-in))
-    (do (log "shiro: generating" (str "'" auth "'") "config")
-        (case auth
-          "anon"  shiro-anon
-          "basic" (shiro-basic)
-          (die "FUSEKI_AUTH must be 'anon' or 'basic', got:" auth)))))
+    (let [mode (or (when (System/getenv "FUSEKI_AUTH") auth)
+                   (some-> cfg-auth name)
+                   auth)]
+      (log "shiro: generating" (str "'" mode "'") "config")
+      (case mode
+        "anon"  render/shiro-anon
+        "basic" (let [user (env "FUSEKI_ADMIN_USER" "admin")
+                      pw   (read-secret)]
+                  (when-not pw
+                    (die "auth is 'basic' but no FUSEKI_ADMIN_PASSWORD or FUSEKI_ADMIN_PASSWORD_FILE."))
+                  (try (render/shiro-basic user pw)
+                       (catch Exception e (die (ex-message e)))))
+        (die "auth must be 'anon' or 'basic', got:" mode)))))
 
 (defn -main []
   (fs/create-dirs base)
-  (let [eff-cfg   (str base "/config.effective.ttl")
-        eff-shiro (str base "/shiro.ini")        ; Fuseki discovers shiro.ini in FUSEKI_BASE
-        cfg       (resolve-config)
-        shiro     (resolve-shiro)]
+  (let [eff-cfg        (str base "/config.effective.ttl")
+        eff-shiro      (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
+        [cfg descr]    (resolve-config)
+        ;; :auth from the EDN only applies when the EDN is the config source.
+        edn-auth       (when (and (fs/exists? edn-in) (not (fs/exists? cfg-in)))
+                         (try (:mode (:auth (render/parse (slurp edn-in)))) (catch Exception _ nil)))
+        shiro          (resolve-shiro edn-auth)]
     (spit eff-cfg cfg)
     (spit eff-shiro shiro)
-    (log "effective config ->" eff-cfg)
+    (log "effective config ->" eff-cfg (str "(" descr ")"))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (let [launch (case ui
                    "on"  ["java" "-jar" jar]

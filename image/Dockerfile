@@ -34,7 +34,7 @@ RUN set -eux; \
     V="$TEMURIN_VERSION"; \
     TAG="jdk-$(echo "$V" | sed 's/+/%2B/')"; \
     FILE="OpenJDK21U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
-    curl -fsSL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
     mkdir -p /opt/jre; tar -xzf /tmp/jre.tgz -C /opt/jre --strip-components=1; rm /tmp/jre.tgz
 ENV JAVA_HOME=/opt/jre
 ENV PATH="/opt/jre/bin:${PATH}"
@@ -42,7 +42,7 @@ ENV PATH="/opt/jre/bin:${PATH}"
 # Apache Jena Fuseki (standalone). archive.apache.org is permanent — dlcdn is
 # latest-only and 404s a pinned version once a newer Jena ships.
 RUN set -eux; \
-    curl -fsSL "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz" -o /tmp/fuseki.tgz; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz" -o /tmp/fuseki.tgz; \
     mkdir -p /opt/fuseki; tar -xzf /tmp/fuseki.tgz -C /opt/fuseki --strip-components=1; rm /tmp/fuseki.tgz
 
 # babashka — the entrypoint runtime (arch-specific static binary).
@@ -52,14 +52,19 @@ RUN set -eux; \
       arm64) BB_ARCH=aarch64 ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/babashka/babashka/releases/download/v${BB_VERSION}/babashka-${BB_VERSION}-linux-${BB_ARCH}-static.tar.gz" -o /tmp/bb.tgz; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 "https://github.com/babashka/babashka/releases/download/v${BB_VERSION}/babashka-${BB_VERSION}-linux-${BB_ARCH}-static.tar.gz" -o /tmp/bb.tgz; \
     tar -xzf /tmp/bb.tgz -C /usr/local/bin bb; rm /tmp/bb.tgz; \
     bb --version
 
-COPY entrypoint/entrypoint.clj /opt/sp-fuseki/entrypoint.clj
+# The whole entrypoint tree: entrypoint.clj (orchestration) + sp_fuseki/render.clj
+# (pure rendering, unit-tested by test/render_test.clj).
+COPY entrypoint/ /opt/sp-fuseki/
 
 ENV FUSEKI_BASE=/fuseki/run
 ENV FUSEKI_JAR=/opt/fuseki/fuseki-server.jar
+# So `(require '[sp-fuseki.render])` resolves without passing --classpath here
+# and in every ad-hoc `bb` invocation inside the container.
+ENV BABASHKA_CLASSPATH=/opt/sp-fuseki
 
 # Non-root. The data/runtime dirs must be writable by the runtime user.
 #

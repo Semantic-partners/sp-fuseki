@@ -64,6 +64,15 @@ jobs:
           platforms: linux/amd64
           build-args: |
             JENA_VERSION=${{ matrix.jena }}
+      # Renderer contract, run with the bb that actually ships in the image — no
+      # third-party setup action, and no chance of testing a different bb version
+      # than the entrypoint uses. Before the integration tests: it's sub-second
+      # and a broken rendering rule should fail fast.
+      - name: Unit tests (fuseki.edn renderer)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w \
+            --entrypoint bash sp-fuseki:ci-${{ matrix.jena }} test/unit.sh
+
       - name: Packaging smoke test
         run: IMAGE=sp-fuseki:ci-${{ matrix.jena }} bash test/smoke.sh
 

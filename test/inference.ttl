@@ -1,0 +1,11 @@
+# Fixture for the reasoner assertion in smoke.sh §9.
+#
+# Socrates is only *stated* to be a Man. Mortal is entailed via rdfs:subClassOf,
+# so an ASK for `socrates a Mortal` proves the RDFS reasoner is actually running
+# rather than :reasoner being decorative in the rendered TTL.
+
+@prefix ex:   <http://example.org/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:Man rdfs:subClassOf ex:Mortal .
+ex:socrates a ex:Man .
