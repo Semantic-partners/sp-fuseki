@@ -15,6 +15,12 @@ on:
 env:
   REGISTRY: ghcr.io
 
+# Two runs racing on the same ref can land `latest` on the older commit's default
+# Jena. Newest push wins; supersede the one in flight.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # One place decides what we build. The Dockerfile's JENA_VERSION (Renovate-managed)
   # is the default leg — it gets the moving `latest` tag. EXTRA_JENA lists the older
