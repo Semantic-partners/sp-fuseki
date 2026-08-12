@@ -1,20 +1,36 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "extends": [
+    "config:recommended"
+  ],
   "customManagers": [
     {
       "customType": "regex",
       "description": "Bump *_VERSION ARGs annotated with a # renovate: comment",
-      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/"
+      ],
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+extractVersion=(?<extractVersion>\\S+))?\\s*\\nARG \\w+=(?<currentValue>\\S+)"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Bump *-version defs in generated-CI sources (never the generated YAML \u2014 Renovate editing a generated file would be reverted by regeneration and fail the drift check)",
+      "managerFilePatterns": [
+        "/^ci/.*\\.clj$/"
+      ],
+      "matchStrings": [
+        ";;\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\(def \\S+ \"(?<currentValue>[^\"]+)\"\\)"
       ]
     }
   ],
   "packageRules": [
     {
       "description": "Never blind-auto-merge a fresh Jena release the day it drops; review it.",
-      "matchPackageNames": ["org.apache.jena:jena-fuseki-server"],
+      "matchPackageNames": [
+        "org.apache.jena:jena-fuseki-server"
+      ],
       "automerge": false,
       "minimumReleaseAge": "3 days"
     }
