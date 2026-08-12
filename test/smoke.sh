@@ -19,6 +19,9 @@
 #      effective TTL is written, and the reasoner actually infers
 #  10. a mounted config.ttl beats a mounted fuseki.edn, and says so in the log
 #  11. a broken fuseki.edn is FATAL at boot with an actionable message
+#  12. settings the EDN carries are HONOURED, not just validated (:ui), and the
+#      resolved value is logged with its source
+#  13. an explicit env var beats the EDN
 #
 # 9-11 cover the EDN path; the renderer's own rules are unit-tested in
 # test/render_test.clj (bash test/unit.sh), which is the faster feedback loop.
@@ -45,6 +48,11 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
+
+# Idempotent: sections that use `docker run --rm` leave $cid already reaped, and a
+# spurious "No such container" in a passing run is noise in a suite whose whole
+# point is being readable.
+drop() { for c in "${CIDS[@]:-}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done; CIDS=(); }
 
 wait_ping() {
   local base="$1" i
@@ -81,7 +89,7 @@ echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
   || fail "ASK did not return true; got: $ask"
 pass "round-trip confirmed"
 
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 
 # 4. config-respecting
 echo "[4] mounted config.ttl is honoured"
@@ -96,7 +104,7 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -G "${base}/ds/sparql" --data-url
 [ "$code" = "404" ] || fail "expected generated default /ds to be absent (404), got $code"
 pass "generated default /ds absent — config respected, not merged"
 
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 
 # 5 + 6. UI is served; anon mode fences the mutating admin API.
 echo "[5] Fuseki's own UI is served"
@@ -132,7 +140,7 @@ curl -fsS -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
   || fail "data endpoint /ds/sparql broke while fencing admin"
 pass "data endpoints still anonymous"
 
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 
 # 7. headless variant — same image, runtime switch.
 echo "[7] FUSEKI_UI=off serves no UI, data endpoints unaffected"
@@ -151,7 +159,7 @@ echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
   || fail "headless: ASK did not return true; got: $ask"
 pass "headless round-trip confirmed"
 
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 
 # 8. TDB2 persistence on the documented mount path.
 echo "[8] TDB2 on a volume at /fuseki/databases survives a restart"
@@ -178,7 +186,7 @@ echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
   || fail "triple did not survive restart — persistence broken; got: $ask"
 pass "data survived a container restart"
 
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 
 # 9. fuseki.edn as a config source, and its precedence against a mounted TTL.
 echo "[9] fuseki.edn renders to TTL"
@@ -209,7 +217,7 @@ echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
   || fail "RDFS inference did not entail the supertype; got: $ask"
 pass "RDFS reasoner entails rdfs:subClassOf (inference is real)"
 
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 
 echo "[10] a mounted config.ttl beats a mounted fuseki.edn, loudly"
 cid="$(docker run -d -p "${PORT}:3030" \
@@ -231,12 +239,48 @@ echo "$logs" | grep -q "IGNORED" \
 pass "the ignored EDN was logged"
 
 echo "[11] a broken fuseki.edn fails loudly at boot"
-docker rm -f "$cid" >/dev/null; CIDS=()
+drop
 printf '{:datasets [{:name "bad/name" :storage :mem :endpoints #{:query}}]}\n' > "${TMP}/bad.edn"
 out="$(docker run --rm -v "${TMP}/bad.edn:/fuseki/fuseki.edn:ro" "$IMAGE" 2>&1 || true)"
 echo "$out" | grep -q "FATAL" || fail "invalid EDN did not produce a FATAL message; got: $out"
 echo "$out" | grep -q "URL path segment" \
   || fail "error message did not explain the problem; got: $out"
 pass "invalid EDN -> FATAL with an actionable message, no half-configured boot"
+
+drop
+
+# 12. Settings the EDN carries are HONOURED, not merely validated.
+#
+# This exists because `:ui {:enabled false}` was type-checked by the renderer and
+# then ignored: you got a UI anyway. A key that validates and does nothing is the
+# same "config that lies" this image refuses elsewhere — and it's the very line
+# that made us believe the image shipped without a UI in the first place.
+echo "[12] fuseki.edn :ui {:enabled false} actually disables the UI"
+cat > "${TMP}/ui-off.edn" <<'EOF'
+{:ui {:enabled false}
+ :datasets [{:name "ds" :storage :mem :endpoints #{:query :gsp-rw}}]}
+EOF
+cid="$(docker run -d -p "${PORT}:3030" -v "${TMP}/ui-off.edn:/fuseki/fuseki.edn:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$base/")"
+[ "$code" != "200" ] || fail "EDN :ui {:enabled false} was ignored — UI still served at / (200)"
+pass "/ not served (got $code)"
+curl -fsS -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "data endpoint broke with the UI disabled from EDN"
+pass "data endpoints unaffected"
+logs="$(docker logs "$cid" 2>&1 || true)"
+echo "$logs" | grep -qE "ui: off \(from fuseki.edn" \
+  || fail "the resolved setting and its source were not logged; got: $(echo "$logs" | grep -i 'ui:' || true)"
+pass "resolved value logged with its source"
+
+drop
+
+echo "[13] an explicit FUSEKI_UI beats the EDN"
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_UI=on \
+  -v "${TMP}/ui-off.edn:/fuseki/fuseki.edn:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+root="$(curl -fsS "$base/")" || fail "FUSEKI_UI=on did not override the EDN's :ui false"
+echo "$root" | grep -q 'Apache Jena Fuseki UI' || fail "GET / was not the UI shell"
+pass "env overrides the file, as documented"
 
 echo "== smoke PASSED =="
