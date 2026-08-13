@@ -14,10 +14,37 @@
 ;; Reader tags — the part you can't get from hand-written TTL.
 ;; ---------------------------------------------------------------------------
 ;;
-;; #env "VAR"  -> the environment variable, or a loud failure
+;; #env "VAR"   -> the environment variable, or a loud failure
 ;; #file "path" -> the file's trimmed contents (Docker/K8s secret, SOPS output)
+;; #include "path" -> that file's EDN value, spliced in where the tag sits
 ;;
-;; This is how a credential reaches the config without ever being IN the config.
+;; The first two are how a credential reaches the config without ever being IN
+;; the config. The third is how a config with several datasets stops being one
+;; unreadable file.
+;;
+;; This tag set is CLOSED and each member is documented in the README and
+;; exercised by the tests. That is deliberate: taking a config library off the
+;; shelf would bring its whole tag vocabulary with it, and every tag we didn't
+;; document would be an extension point that works but isn't stated — the exact
+;; property this image exists to not have. See RFC → Config.
+
+(declare readers)
+
+(def ^:private ^:dynamic *source*
+  "The file currently being read, so #include resolves relative to the file that
+  wrote it rather than the process's working directory. nil when parsing a string
+  with no file behind it (tests, the built-in default)."
+  nil)
+
+(def ^:private ^:dynamic *include-stack*
+  "Canonical paths of the files currently open, newest last. Cycle detection, and
+  the trail printed when one is found."
+  [])
+
+(def ^:private max-include-depth
+  "A cycle is caught exactly; this catches the pathological-but-acyclic case and,
+  more usefully, stops a runaway from arriving as a StackOverflowError."
+  10)
 
 (defn- read-env [v]
   (when-not (string? v)
@@ -33,16 +60,64 @@
       (throw (ex-info (str "#file \"" v "\" does not exist") {:path v})))
     (str/trim (slurp f))))
 
-(def readers {'env read-env 'file read-file-tag})
+(defn- resolve-include
+  "Where `#include \"x\"` actually points. Relative paths resolve against the
+  including FILE's directory — not the working directory — so a config directory
+  can be moved or mounted anywhere and still find its own parts."
+  [^String v]
+  (let [f (java.io.File. v)]
+    (if (.isAbsolute f)
+      f
+      (java.io.File. ^java.io.File (or (some-> ^java.io.File *source* .getAbsoluteFile .getParentFile)
+                                       (java.io.File. "."))
+                     v))))
+
+(defn- read-include [v]
+  (when-not (string? v)
+    (throw (ex-info (str "#include takes a string path, got: " (pr-str v)) {})))
+  (let [f     (resolve-include v)
+        canon (.getCanonicalPath f)]
+    (when-not (.exists f)
+      (throw (ex-info (str "#include \"" v "\" does not exist (resolved to " canon ")")
+                      {:path canon})))
+    ;; Checked before the depth limit so a genuine cycle reports as a cycle, with
+    ;; the trail, rather than as "nested too deep" ten frames later.
+    (when (some #{canon} *include-stack*)
+      (throw (ex-info (str "#include cycle: "
+                           (str/join " -> " (conj (vec *include-stack*) canon)))
+                      {:cycle (conj (vec *include-stack*) canon)})))
+    (when (>= (count *include-stack*) max-include-depth)
+      (throw (ex-info (str "#include is nested more than " max-include-depth
+                           " files deep — that is almost certainly a mistake")
+                      {:depth (count *include-stack*)})))
+    (binding [*source*        f
+              *include-stack* (conj (vec *include-stack*) canon)]
+      (edn/read-string {:readers readers} (slurp f)))))
+
+;; Deliberately not confined to a directory. Whoever writes fuseki.edn already
+;; controls the whole configuration and could mount a config.ttl instead, so
+;; there is no privilege boundary here to defend — a sandbox would be theatre
+;; that broke `#include "/etc/sp-fuseki/shared.edn"` for no gain.
+(def readers {'env read-env 'file read-file-tag 'include read-include})
 
 (defn parse
-  "Parse fuseki.edn text, resolving #env/#file. Throws with a readable message."
-  [text]
-  (try
-    (edn/read-string {:readers readers} text)
-    (catch clojure.lang.ExceptionInfo e (throw e))
-    (catch Exception e
-      (throw (ex-info (str "fuseki.edn is not valid EDN: " (ex-message e)) {} e)))))
+  "Parse fuseki.edn text, resolving #env/#file/#include. Throws with a readable
+  message.
+
+  `source` is the path the text came from, and it is what makes #include's
+  relative resolution and cycle detection work. Omit it and #include still
+  works, resolving against the working directory."
+  ([text] (parse text nil))
+  ([text source]
+   (binding [*source*        (some-> ^String source (java.io.File.))
+             *include-stack* (if source
+                               [(.getCanonicalPath (java.io.File. ^String source))]
+                               [])]
+     (try
+       (edn/read-string {:readers readers} text)
+       (catch clojure.lang.ExceptionInfo e (throw e))
+       (catch Exception e
+         (throw (ex-info (str "fuseki.edn is not valid EDN: " (ex-message e)) {} e)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Validation — fail loudly at boot, never half-configured.
@@ -53,10 +128,59 @@
 (def ^:private reasoners {:none nil
                           :rdfs      "http://jena.hpl.hp.com/2003/RDFSExptRuleReasoner"
                           :owl-micro "http://jena.hpl.hp.com/2003/OWLMicroFBRuleReasoner"})
+;; operation -> [assembler predicate, Fuseki's conventional endpoint name].
+;;
+;; The conventional names are Fuseki's, not ours — :query is "sparql" because
+;; that is what stock Fuseki serves a query endpoint at. It surprises people
+;; reasonably often (`:query` in the EDN, /ds/query a 404) which is why the
+;; resolved routes are logged at boot and why :endpoints can name them
+;; explicitly. Changing the DEFAULT would silently move the URLs of anyone
+;; already running the published image, so it stays.
 (def ^:private operations {:query  ["fuseki:query"  "sparql"]
                            :update ["fuseki:update" "update"]
                            :gsp-rw ["fuseki:gsp-rw" "data"]
                            :gsp-r  ["fuseki:gsp-r"  "get"]})
+
+(def ^:private root-route
+  "A nil name means the endpoint answers at the dataset root — /ds rather than
+  /ds/sparql. In the assembler that is an endpoint with no fuseki:name, which is
+  the same thing Fuseki's own legacy syntax spells as the empty string in
+  `fuseki:serviceQuery \"sparql\", \"query\", \"\"`."
+  nil)
+
+(defn- route-names
+  "One :endpoints map value -> the endpoint names it asks for.
+
+  true       -> Fuseki's conventional name for that operation
+  \"foo\"      -> /ds/foo
+  nil or \"\"  -> the dataset root
+  a vector   -> several of the above, in the order written
+
+  Returns ::bad for anything else so validate! can say which dataset and key."
+  [op v]
+  (let [one (fn [x]
+              (cond (true? x)   (second (operations op))
+                    (nil? x)    root-route
+                    (string? x) (when-not (str/blank? x) x)
+                    :else       ::bad))]
+    (if (vector? v) (mapv one v) [(one v)])))
+
+(defn- endpoint-routes
+  "Both spellings of :endpoints collapse here into an ordered seq of
+  [operation name], name possibly nil for the root. Everything downstream —
+  rendering, validation, the boot log — reads this one shape, so they cannot
+  disagree about what a config asked for.
+
+  Operations are sorted so the same EDN always renders byte-identical TTL; names
+  within an operation keep the order they were written in, which a vector already
+  makes deterministic."
+  [endpoints]
+  (if (map? endpoints)
+    (for [op (sort-by (comp str name) (keys endpoints))
+          nm (route-names op (get endpoints op))]
+      [op nm])
+    (for [op (sort-by (comp str name) endpoints)]
+      [op (second (operations op))])))
 
 (defn- bad [& msg] (throw (ex-info (apply str msg) {:validation true})))
 
@@ -69,6 +193,42 @@
   (when (re-find #"[/\s?#]" n)
     (bad "dataset :name \"" n "\" must not contain '/', '?', '#' or whitespace"
          " — it becomes a URL path segment")))
+
+(defn- check-endpoints
+  "Both spellings are checked here, so the set form and the map form can't drift
+  into having different rules."
+  [d]
+  (let [dsn       (:name d)
+        endpoints (:endpoints d)
+        known     (str/join ", " (sort (keys operations)))]
+    (when-not (seq endpoints)
+      (bad "dataset \"" dsn "\" needs at least one of :endpoints " known))
+    (when-let [bad-ops (seq (remove operations (if (map? endpoints) (keys endpoints) endpoints)))]
+      (bad "dataset \"" dsn "\" has unknown :endpoints "
+           (str/join ", " (sort (map pr-str bad-ops))) ". Known: " known))
+    (when (map? endpoints)
+      (doseq [[op v] endpoints]
+        (when (some #{::bad} (route-names op v))
+          (bad "dataset \"" dsn "\" :endpoints " op " must be true (Fuseki's"
+               " conventional name), a string, nil for the dataset root, or a"
+               " vector of those — got: " (pr-str v)))))
+    (let [routes (endpoint-routes endpoints)]
+      ;; The same operation asked for at the same path twice is redundant rather
+      ;; than harmful, but it means the config says something it doesn't mean.
+      (when-let [dupes (seq (for [[pair n] (frequencies routes) :when (> n 1)] pair))]
+        (bad "dataset \"" dsn "\" asks for the same endpoint more than once: "
+             (str/join ", " (for [[op nm] dupes]
+                              (str op " at " (if nm (str "\"" nm "\"") "the dataset root"))))))
+      ;; A name claimed by two operations IS harmful: one path, two meanings, and
+      ;; which one answers is Fuseki's business rather than something we can state.
+      ;; Two operations at the ROOT is fine and common — Fuseki dispatches those
+      ;; on the request, which is what `fuseki:serviceQuery ""` relies on.
+      (when-let [clashes (seq (for [[nm pairs] (group-by second routes)
+                                    :when (and nm (> (count (distinct (map first pairs))) 1))]
+                                nm))]
+        (bad "dataset \"" dsn "\" gives the name "
+             (str/join " and " (map #(str "\"" % "\"") (sort clashes)))
+             " to more than one operation — one path can only mean one thing")))))
 
 (defn validate!
   "Throw with an actionable message, or return the config unchanged."
@@ -117,12 +277,7 @@
       (when-not (storages (:storage d))
         (bad "dataset \"" (:name d) "\" :storage must be one of "
              (str/join ", " (sort storages)) ", got: " (pr-str (:storage d))))
-      (when-not (seq (:endpoints d))
-        (bad "dataset \"" (:name d) "\" needs at least one of :endpoints "
-             (str/join ", " (sort (keys operations)))))
-      (when-let [bad-ops (seq (remove operations (:endpoints d)))]
-        (bad "dataset \"" (:name d) "\" has unknown :endpoints "
-             (str/join ", " (sort bad-ops)) ". Known: " (str/join ", " (sort (keys operations)))))
+      (check-endpoints d)
       (when-let [r (:reasoner d)]
         (when-not (contains? reasoners r)
           (bad "dataset \"" (:name d) "\" :reasoner must be one of "
@@ -148,13 +303,14 @@
       (format "@prefix %-7s <%s> ." (str p ":") iri))))
 
 (defn- endpoint-lines [endpoints]
-  ;; Sorted so the same EDN always renders byte-identical TTL — a diffable
-  ;; effective config is worth more than preserving set order (which sets lack).
-  (for [op (sort-by (comp str name) endpoints)
-        :let [[operation ep-name] (operations op)]]
+  (for [[op nm] (endpoint-routes endpoints)
+        :let [[operation] (operations op)]]
     ;; Operation padded so the effective config lines up when you read it — it's
-    ;; a file humans are told to go and look at.
-    (format "   fuseki:endpoint [ fuseki:operation %-14s ; fuseki:name \"%s\" ] ;" operation ep-name)))
+    ;; a file humans are told to go and look at. An endpoint with no fuseki:name
+    ;; is how the assembler spells "answers at the dataset root".
+    (if nm
+      (format "   fuseki:endpoint [ fuseki:operation %-14s ; fuseki:name \"%s\" ] ;" operation nm)
+      (format "   fuseki:endpoint [ fuseki:operation %-14s ] ;" operation))))
 
 (defn- graph-block
   "The default graph for a :mem dataset, wrapped in an InfModel if a reasoner is on."
@@ -200,6 +356,19 @@
     [""]
     (interpose "" (map #(service-block % tdb2-root) (:datasets cfg)))
     [""])))
+
+(defn routes
+  "The URL paths a config will answer on, as [dataset-name [path ...]] pairs.
+
+  A route is a resolved decision exactly like :auth or :port, and an unlogged one
+  is how `:endpoints #{:query}` serving /ds/sparql could be a silent 404 for
+  someone who reasonably expected /ds/query. Logged at boot for the same reason
+  those are — see entrypoint.clj."
+  [cfg]
+  (for [d (:datasets cfg)]
+    [(:name d)
+     (distinct (for [[_ nm] (endpoint-routes (:endpoints d))]
+                 (if nm (str "/" (:name d) "/" nm) (str "/" (:name d)))))]))
 
 ;; ---------------------------------------------------------------------------
 ;; shiro.ini rendering — shared by the env-driven and EDN-driven paths, so the

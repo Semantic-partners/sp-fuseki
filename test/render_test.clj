@@ -64,6 +64,93 @@
     (is (str/includes? ttl "fuseki:name \"a\""))
     (is (str/includes? ttl "fuseki:name \"b\""))))
 
+;; ---------------------------------------------------------------------------
+;; Endpoints: what path a dataset actually answers on
+;; ---------------------------------------------------------------------------
+
+(deftest the-set-form-uses-fusekis-conventional-names
+  (testing ":query is \"sparql\" because that is what stock Fuseki serves —
+  surprising, load-bearing, and NOT changed here, because moving it would move
+  the URLs of anyone already running the published image"
+    (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem :endpoints #{:query}}]})]
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"sparql\""))
+      (is (not (str/includes? ttl "fuseki:name \"query\""))))))
+
+(deftest endpoints-can-be-named-explicitly
+  (testing "which is the answer to the surprise above: ask for /ds/query and get it"
+    (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem
+                                       :endpoints {:query "query"}}]})]
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"query\""))))
+  (testing "true means 'the conventional name', so one key can be left alone"
+    (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem
+                                       :endpoints {:query "query" :update true}}]})]
+      (is (has? ttl "fuseki:operation fuseki:update ; fuseki:name \"update\""))))
+  (testing "a vector gives one operation several paths — what the ES plugin's own
+  config does with fuseki:serviceQuery \"sparql\", \"query\", \"\""
+    (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem
+                                       :endpoints {:query ["sparql" "query"]}}]})]
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"sparql\""))
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"query\"")))))
+
+(deftest an-endpoint-can-answer-at-the-dataset-root
+  (testing "nil or \"\" means /ds itself — an endpoint with no fuseki:name.
+  Without this an EDN dataset answered on /ds/sparql but 400ed on /ds, which
+  breaks every client that targets the dataset URL directly"
+    (doseq [spec [nil ""]]
+      (let [ttl (r/edn->ttl {:datasets [{:name "kb" :storage :mem
+                                         :endpoints {:query spec}}]})]
+        (is (has? ttl "fuseki:endpoint [ fuseki:operation fuseki:query ] ;")
+            (str "spec " (pr-str spec) " should render an unnamed endpoint"))
+        (is (not (str/includes? ttl "fuseki:name \"\""))))))
+  (testing "root and named endpoints coexist on one operation"
+    (let [ttl (r/edn->ttl {:datasets [{:name "kb" :storage :mem
+                                       :endpoints {:query ["sparql" ""]}}]})]
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"sparql\""))
+      (is (has? ttl "fuseki:endpoint [ fuseki:operation fuseki:query ] ;"))))
+  (testing "two DIFFERENT operations at the root is legal — Fuseki dispatches on
+  the request, which is exactly what a bare serviceQuery relies on"
+    (is (nil? (msg {:datasets [{:name "kb" :storage :mem
+                                :endpoints {:query nil :gsp-rw nil}}]})))))
+
+(deftest endpoint-specs-that-cannot-mean-anything-are-refused
+  (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints {:query 42}}]})
+                     "must be true"))
+  (testing "a set has no order, and the order endpoints are written in is kept"
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem
+                                         :endpoints {:query #{"a" "b"}}}]})
+                       "vector")))
+  (testing "unknown operations are caught in the map form too, not just the set form"
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints {:qeury "x"}}]})
+                       "unknown :endpoints"))))
+
+(deftest ambiguous-and-redundant-routes-are-refused
+  (testing "one path cannot mean two operations"
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem
+                                         :endpoints {:query "x" :update "x"}}]})
+                       "more than one operation")))
+  (testing "and asking for the same endpoint twice means the config says
+  something it doesn't mean"
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem
+                                         :endpoints {:query ["x" "x"]}}]})
+                       "same endpoint more than once"))
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem
+                                         :endpoints {:query [nil ""]}}]})
+                       "the dataset root"))))
+
+(deftest routes-are-computed-for-the-boot-log
+  (testing "a route is a resolved decision, and an unlogged one is a 404 you have
+  to go and discover"
+    (is (= [["kb" ["/kb/sparql" "/kb/query" "/kb"]]]
+           (mapv (fn [[n ps]] [n (vec ps)])
+                 (r/routes {:datasets [{:name "kb" :storage :mem
+                                        :endpoints {:query ["sparql" "query" ""]}}]})))))
+  (testing "the default config's routes are reported too — that's where the
+  conventional-name surprise bites first"
+    (is (= [["ds" ["/ds/data" "/ds/sparql" "/ds/update"]]]
+           (mapv (fn [[n ps]] [n (vec ps)])
+                 (r/routes {:datasets [{:name "ds" :storage :mem
+                                        :endpoints #{:query :update :gsp-rw}}]}))))))
+
 (deftest rendering-is-deterministic
   (testing "same EDN renders byte-identical TTL, so the effective config diffs cleanly"
     (let [cfg (assoc minimal :prefixes {:z "http://z/" :a "http://a/"})]
@@ -189,6 +276,89 @@
     (is (str/includes? (try (r/parse "#file \"/no/such/secret\"") nil
                             (catch Exception e (ex-message e)))
                        "does not exist"))))
+
+;; ---------------------------------------------------------------------------
+;; #include — the tag that keeps a many-dataset config readable
+;; ---------------------------------------------------------------------------
+
+(defn- with-config-dir
+  "Write {relative-path -> content} into a fresh directory and hand back its path.
+  #include resolves against the including FILE, so these tests need real files in
+  real directories — the resolution rule is the thing under test."
+  [files]
+  (let [dir (java.io.File/createTempFile "sp-fuseki-inc" "")]
+    (.delete dir)
+    (.mkdirs dir)
+    (doseq [[path content] files
+            :let [f (java.io.File. dir ^String path)]]
+      (.mkdirs (.getParentFile f))
+      (spit f content))
+    (.getAbsolutePath dir)))
+
+(defn- parse-file [dir path]
+  (let [f (str dir "/" path)]
+    (r/parse (slurp f) f)))
+
+(defn- parse-err [dir path]
+  (try (parse-file dir path) nil
+       (catch Exception e (ex-message e))))
+
+(deftest include-splices-a-file-where-the-tag-sits
+  (let [dir (with-config-dir
+              {"fuseki.edn"        "{:datasets [#include \"parts/kb.edn\"]}"
+               "parts/kb.edn"      "{:name \"kb\" :storage :mem :endpoints #{:query}}"})]
+    (testing "the included value lands exactly where the tag was written"
+      (is (= {:datasets [{:name "kb" :storage :mem :endpoints #{:query}}]}
+             (parse-file dir "fuseki.edn"))))
+    (testing "and the result renders like any other config"
+      (is (str/includes? (r/edn->ttl (parse-file dir "fuseki.edn")) "fuseki:name \"kb\"")))))
+
+(deftest include-resolves-relative-to-the-including-file-not-the-cwd
+  (testing "so a config directory works wherever it happens to be mounted"
+    (let [dir (with-config-dir
+                {"conf/fuseki.edn"   "{:datasets [#include \"sets/kb.edn\"]}"
+                 "conf/sets/kb.edn"  "{:name \"kb\" :storage :mem :endpoints #{:query}}"})]
+      (is (= "kb" (-> (parse-file dir "conf/fuseki.edn") :datasets first :name))))))
+
+(deftest include-nests
+  (let [dir (with-config-dir
+              {"fuseki.edn"   "{:datasets [#include \"a.edn\"]}"
+               "a.edn"        "#include \"b.edn\""
+               "b.edn"        "{:name \"deep\" :storage :mem :endpoints #{:query}}"})]
+    (is (= "deep" (-> (parse-file dir "fuseki.edn") :datasets first :name)))))
+
+(deftest include-cycles-are-caught-and-name-the-trail
+  (testing "a cycle must report as a cycle, not as a StackOverflowError"
+    (let [dir (with-config-dir {"a.edn" "{:datasets [#include \"b.edn\"]}"
+                                "b.edn" "#include \"a.edn\""})
+          m   (parse-err dir "a.edn")]
+      (is (str/includes? m "#include cycle"))
+      (testing "and the trail says which files, in order"
+        (is (str/includes? m "a.edn"))
+        (is (str/includes? m "b.edn"))
+        (is (str/includes? m "->")))))
+  (testing "including yourself is the degenerate case and still a cycle"
+    (let [dir (with-config-dir {"a.edn" "#include \"a.edn\""})]
+      (is (str/includes? (parse-err dir "a.edn") "#include cycle")))))
+
+(deftest include-of-a-missing-file-says-where-it-looked
+  (testing "'does not exist' without the resolved path sends you to the wrong dir"
+    (let [dir (with-config-dir {"fuseki.edn" "{:datasets [#include \"nope.edn\"]}"})
+          m   (parse-err dir "fuseki.edn")]
+      (is (str/includes? m "does not exist"))
+      (is (str/includes? m "nope.edn"))
+      (is (str/includes? m dir)))))
+
+(deftest include-takes-a-string
+  (let [dir (with-config-dir {"fuseki.edn" "{:datasets [#include :kb]}"})]
+    (is (str/includes? (parse-err dir "fuseki.edn") "#include takes a string path"))))
+
+(deftest include-accepts-an-absolute-path
+  (testing "deliberately unconfined — whoever writes fuseki.edn already controls
+  the whole config, so a sandbox would break shared includes for no gain"
+    (let [dir (with-config-dir {"parts/kb.edn" "{:name \"kb\" :storage :mem :endpoints #{:query}}"})
+          top (with-config-dir {"fuseki.edn" (str "{:datasets [#include \"" dir "/parts/kb.edn\"]}")})]
+      (is (= "kb" (-> (parse-file top "fuseki.edn") :datasets first :name))))))
 
 (deftest malformed-edn-says-so
   (is (str/includes? (try (r/parse "{:datasets [") nil

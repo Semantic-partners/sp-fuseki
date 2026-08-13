@@ -120,12 +120,70 @@ TTL and mount that instead.
 
 | | |
 |---|---|
-| `:datasets` | `:name`, `:storage` (`:mem`/`:tdb2`), `:endpoints` (`:query`/`:update`/`:gsp-rw`/`:gsp-r`), `:reasoner` (`:none`/`:rdfs`/`:owl-micro`) |
+| `:datasets` | `:name`, `:storage` (`:mem`/`:tdb2`), `:endpoints` (see below), `:reasoner` (`:none`/`:rdfs`/`:owl-micro`) |
 | `:prefixes` | keyword → IRI, declared once and emitted into the TTL |
 | `:auth` | `{:mode :anon}` or `{:mode :basic}` |
 | `:server` | `{:port 3030}` — honoured, and the container's healthcheck follows it |
 | `:ui` | `{:enabled true}` |
 | `#env "VAR"` / `#file "path"` | read a secret at boot — it never lives in the config |
+| `#include "path"` | splice in another EDN file, resolved relative to the file that wrote it |
+
+### Endpoints — what path a dataset answers on
+
+`:endpoints` takes either a set of operations, which get **Fuseki's conventional
+names**, or a map, which lets you name them yourself:
+
+```clojure
+:endpoints #{:query :update}          ; -> /ds/sparql  /ds/update
+:endpoints {:query   ["sparql" "query" ""]  ; -> /ds/sparql  /ds/query  /ds
+            :update  true                   ; -> /ds/update (the conventional name)
+            :gsp-rw  nil}                   ; -> /ds  (graph store at the root)
+```
+
+| Value | Means |
+|---|---|
+| `true` | Fuseki's conventional name for that operation |
+| `"foo"` | `/ds/foo` |
+| `nil` or `""` | the **dataset root**, `/ds` — an endpoint with no `fuseki:name` |
+| a vector | several of the above, in the order written |
+
+**`:query` is `sparql`, not `query`.** That's Fuseki's convention, not ours —
+stock Fuseki serves a query endpoint at `/ds/sparql`, so `/ds/query` is a 404
+unless you ask for it. It surprises people, so **the resolved routes are logged
+at boot**:
+
+```
+[sp-fuseki] routes: ds -> /ds/sparql /ds/update /ds/data
+```
+
+A route is a decision like `:auth` or `:port`, and this is the same rule those
+follow — what took effect is stated, not left to be discovered by a 404. The
+default stays as it is because moving it would silently move the URLs of anyone
+already running the published image.
+
+Two operations can share the root (Fuseki dispatches those on the request, which
+is what a bare `fuseki:serviceQuery ""` relies on), but a **named** path claimed
+by two operations is refused — one path can only mean one thing.
+
+### Splitting a config up — `#include`
+
+A config with several datasets stops being readable as one file:
+
+```clojure
+;; /conf/fuseki.edn
+{:datasets [#include "sets/chinook.edn"
+            #include "sets/offshore.edn"]}
+```
+
+Relative paths resolve against **the file that wrote them**, not the working
+directory, so a config directory works wherever you mount it. Absolute paths work
+too. Cycles are caught and reported with the trail (`a.edn -> b.edn -> a.edn`),
+and a missing include is a `FATAL` at boot naming the path it resolved to.
+
+The tag set — `#env`, `#file`, `#include` — is **closed and complete**. That is
+deliberate: taking a config library off the shelf would bring its whole tag
+vocabulary along, and every tag we didn't document would be an extension point
+that works but isn't stated, which is the property this image exists to not have.
 
 **`:auth` and `:ui` are also env vars.** An explicitly set `FUSEKI_AUTH` /
 `FUSEKI_UI` wins, then the EDN, then the default — and the resolved value is
@@ -178,6 +236,12 @@ area — `backups/`, `logs/`, `configuration/`, plus our generated
 `config.effective.ttl`. Mounting *that* persists data too, but mixes it with
 regenerated boot files; prefer `/fuseki/databases` for data and mount
 `/fuseki/run` only if you want `/$/backup` output to survive.
+
+**`/fuseki/run/configuration` is pre-created too, for the same ownership reason.**
+It's a path Fuseki's own docs send you to, and mounting a single file into it
+(`-v ./ds.ttl:/fuseki/run/configuration/ds.ttl`) makes Docker create the *missing
+parent* root-owned — Fuseki then dies `Not writable` before serving anything.
+Creating it in the image costs an empty directory and removes the trap.
 
 > **Bind mounts differ by platform.** On Docker Desktop (macOS/Windows) host
 > ownership is remapped — a host directory owned by your user shows up inside the
@@ -336,9 +400,11 @@ The smoke test asserts the **packaging contract** — non-root, boot, `/$/ping`,
 POST→query round-trip, a mounted config honoured (not merged), Fuseki's UI served
 with its bundle intact, the mutating admin API fenced under `anon`,
 `FUSEKI_UI=off` serving no UI while data endpoints keep working, TDB2 on a
-volume at `/fuseki/databases` surviving a restart, and the EDN path — rendering,
-real RDFS entailment, TTL-beats-EDN precedence, and a malformed EDN failing loudly
-at boot. It does **not**
+volume at `/fuseki/databases` surviving a restart, a file mounted into
+`/fuseki/run/configuration` not killing the boot, and the EDN path — rendering,
+real RDFS entailment, TTL-beats-EDN precedence, named and root endpoints
+answering, `#include` splicing a config directory, and both a malformed EDN and a
+missing include failing loudly at boot. It does **not**
 test Jena's correctness; that's Apache's job (see
 [docs/ASSESSMENT.md](docs/ASSESSMENT.md) §6).
 

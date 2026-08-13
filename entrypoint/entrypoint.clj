@@ -115,9 +115,15 @@
   (attempt source #(render/edn->ttl cfg {:source source :tdb2-root tdb2-root})))
 
 (defn resolve-config
-  "Returns {:ttl :descr :edn}. The EDN is parsed ONCE and handed back, so the
-  settings it carries (:auth, :ui) come from the same value we rendered — reading
-  the file twice invited the two to disagree.
+  "Returns {:ttl :descr :edn :routes}. The EDN is parsed ONCE and handed back, so
+  the settings it carries (:auth, :ui) come from the same value we rendered —
+  reading the file twice invited the two to disagree.
+
+  `:routes` is separate from `:edn` on purpose. It's present whenever we rendered
+  the config ourselves — including the built-in default, which is exactly where
+  the /ds/sparql-not-/ds/query surprise bites hardest — while `:edn` stays
+  strictly \"the user mounted an EDN\", because that is what the :auth/:ui
+  precedence rule keys off.
 
   Resolution order is in the header."
   []
@@ -129,19 +135,25 @@
             (log "NOTE:" edn-in "is present but IGNORED —" cfg-in
                  "wins. A mounted config.ttl is always honoured untouched."))
           (log "config: honouring mounted" cfg-in)
-          {:ttl (slurp cfg-in) :descr (str "mounted " cfg-in) :edn nil})
+          ;; No :routes — the TTL is honoured untouched and we don't parse it, so
+          ;; we genuinely don't know. Saying nothing beats guessing.
+          {:ttl (slurp cfg-in) :descr (str "mounted " cfg-in) :edn nil :routes nil})
 
       have-edn
-      (let [cfg (attempt edn-in #(render/validate! (render/parse (slurp edn-in))))]
+      ;; The path goes in as well as the text: #include resolves relative to the
+      ;; file that wrote it, so a config directory works wherever it's mounted.
+      (let [cfg (attempt edn-in #(render/validate! (render/parse (slurp edn-in) edn-in)))]
         (log "config: rendering" edn-in "-> assembler TTL")
-        {:ttl (render-ttl cfg edn-in) :descr (str "rendered from " edn-in) :edn cfg})
+        {:ttl (render-ttl cfg edn-in) :descr (str "rendered from " edn-in)
+         :edn cfg :routes (render/routes cfg)})
 
       :else
       (do (log "config: no file at" cfg-in "or" edn-in
                "— generating default in-memory dataset /" ds-name)
           {:ttl (render-ttl (default-edn) "the built-in default")
            :descr "generated default"
-           :edn nil}))))
+           :edn nil
+           :routes (render/routes (default-edn))}))))
 
 (defn resolve-setting
   "Env wins when explicitly set, then the EDN, then the default — and log which,
@@ -198,7 +210,7 @@
   (let [eff-cfg   (str base "/config.effective.ttl")
         eff-shiro (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
         eff-port  (str base "/port")        ; read by the image's HEALTHCHECK
-        {:keys [ttl descr edn]} (resolve-config)
+        {:keys [ttl descr edn routes]} (resolve-config)
         ;; Both settings come from the ONE parsed config above. They only apply
         ;; when the EDN is the config source — a mounted config.ttl means the EDN
         ;; was ignored wholesale, and half-honouring an ignored file would be
@@ -218,6 +230,11 @@
     ;; reported unhealthy, because HEALTHCHECK only knows the env var.
     (spit eff-port port)
     (log "effective config ->" eff-cfg (str "(" descr ")"))
+    ;; Routes are decisions too. `:endpoints #{:query}` serves /ds/sparql because
+    ;; that is Fuseki's conventional name — printing the paths turns that from a
+    ;; 404 you have to go and discover into a line you already read at boot.
+    (doseq [[ds paths] routes]
+      (log "routes:" ds "->" (str/join " " paths)))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (log "effective port   ->" eff-port (str "(" port ")"))
     (let [launch (case ui
