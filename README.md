@@ -123,7 +123,7 @@ TTL and mount that instead.
 | `:datasets` | `:name`, `:storage` (`:mem`/`:tdb2`), `:endpoints` (`:query`/`:update`/`:gsp-rw`/`:gsp-r`), `:reasoner` (`:none`/`:rdfs`/`:owl-micro`) |
 | `:prefixes` | keyword → IRI, declared once and emitted into the TTL |
 | `:auth` | `{:mode :anon}` or `{:mode :basic}` |
-| `:server` | `{:port 3030}` |
+| `:server` | `{:port 3030}` — honoured, and the container's healthcheck follows it |
 | `:ui` | `{:enabled true}` |
 | `#env "VAR"` / `#file "path"` | read a secret at boot — it never lives in the config |
 
@@ -195,13 +195,18 @@ regenerated boot files; prefer `/fuseki/databases` for data and mount
 | `FUSEKI_EDN` | `/fuseki/fuseki.edn` | Where to look for a mounted EDN config (used only if no `config.ttl`). |
 | `FUSEKI_TDB2_ROOT` | `/fuseki/databases` | Directory `:tdb2` datasets are rendered under. |
 | `FUSEKI_SHIRO` | `/fuseki/shiro.ini` | Where to look for a mounted shiro.ini. |
-| `FUSEKI_PORT` | `3030` | Listen port. |
+| `FUSEKI_PORT` | `3030` | Listen port. Also settable as `:server {:port n}` in `fuseki.edn`; env wins. The healthcheck follows whichever applied. |
 | `FUSEKI_DATASET` | `ds` | Name of the generated default dataset (when no config mounted). |
 | `FUSEKI_AUTH` | `anon` | `anon` (throwaway/lab) or `basic` (all endpoints require login, except `/$/ping` so the healthcheck works). |
 | `FUSEKI_UI` | `on` | `on` serves Fuseki's own UI + admin area at `/`. `off` runs the headless server — no UI, no admin area, data endpoints unchanged. Same image either way. |
 | `FUSEKI_ADMIN_USER` | `admin` | Basic-auth username. |
 | `FUSEKI_ADMIN_PASSWORD` | — | Basic-auth secret, inline. |
-| `FUSEKI_ADMIN_PASSWORD_FILE` | — | Basic-auth secret, read from a file (Docker/K8s secret, vault-agent sink, SOPS output). Preferred over the inline form. |
+| `FUSEKI_ADMIN_PASSWORD_FILE` | — | Basic-auth secret, read from a file (Docker/K8s secret, vault-agent sink, SOPS output). Preferred over the inline form; trailing newline trimmed. |
+
+Credentials can also come from `fuseki.edn` as `:auth {:user … :password #env "…"}`
+or `#file`. Env wins over the file, and the boot log names **which source** supplied
+the secret — never the secret. All five paths (env, `*_FILE`, EDN `#env`, a missing
+file, and a mounted `shiro.ini`) are covered by [smoke.sh](test/smoke.sh) §14–18.
 
 **Secrets are backend-agnostic by design.** The image never bakes in a secrets
 manager: a credential arrives via env, a `*_FILE` path, or your own mounted

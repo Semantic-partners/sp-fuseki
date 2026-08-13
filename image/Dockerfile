@@ -126,7 +126,11 @@ USER fuseki
 WORKDIR /fuseki
 
 EXPOSE 3030
+# Reads the port the entrypoint ACTUALLY resolved, from the file it writes under
+# FUSEKI_BASE, falling back to the env var and then the default. The port can come
+# from fuseki.edn's :server {:port n}, and a healthcheck that only knew
+# FUSEKI_PORT would report such a container unhealthy while it served happily.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=6 \
-  CMD ["sh", "-c", "curl -fsS \"http://localhost:${FUSEKI_PORT:-3030}/\\$/ping\" || exit 1"]
+  CMD ["sh", "-c", "p=$(cat \"${FUSEKI_BASE:-/fuseki/run}/port\" 2>/dev/null || echo \"${FUSEKI_PORT:-3030}\"); curl -fsS \"http://localhost:${p}/\\$/ping\" || exit 1"]
 
 ENTRYPOINT ["bb", "/opt/sp-fuseki/entrypoint.clj"]

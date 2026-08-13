@@ -145,6 +145,21 @@
   (is (str/includes? (msg (assoc minimal :auth {:mode :ldap})) ":auth :mode must be"))
   (is (nil? (msg (assoc minimal :auth {:mode :basic})))))
 
+(deftest auth-accepts-credentials-and-rejects-unknown-keys
+  (testing ":user and :password are honoured by the entrypoint, so they validate"
+    (is (nil? (msg (assoc minimal :auth {:mode :basic :user "carol" :password "s3cret"})))))
+  (testing "an unknown key is refused — silent acceptance is how :password came to be"
+    (testing "documented in examples/fuseki.edn and ignored for a day"
+      (let [m (msg (assoc minimal :auth {:mode :basic :passwrod "typo"}))]
+        (is (str/includes? m ":auth has unknown key"))
+        (is (str/includes? m ":password") "the message should list what IS accepted"))))
+  (testing "a non-string credential points at the reader tags"
+    (is (str/includes? (msg (assoc minimal :auth {:mode :basic :password 12345}))
+                       "#env")))
+  (testing "a password with :anon would do nothing, so it's an error not a no-op"
+    (is (str/includes? (msg (assoc minimal :auth {:mode :anon :password "x"}))
+                       "silently do nothing"))))
+
 (deftest port-must-be-a-real-port
   (is (str/includes? (msg (assoc minimal :server {:port 0})) "1-65535"))
   (is (str/includes? (msg (assoc minimal :server {:port "3030"})) "1-65535")))
