@@ -270,6 +270,21 @@
   (is (str/includes? (msg {}) ":datasets must be a non-empty vector"))
   (is (str/includes? (msg {:datasets []}) ":datasets must be a non-empty vector")))
 
+(deftest two-datasets-cannot-share-a-name
+  (testing "the endpoint-ambiguity rule one level up — Jena does catch this, but
+  only after we have printed routes for both, and its message names neither the
+  file nor which one to change"
+    (let [m (msg {:datasets [{:name "x" :storage :mem :endpoints {:query "query"}}
+                             {:name "x" :storage :mem :endpoints {:update "update"}}]})]
+      (is (str/includes? m "share the name"))
+      (is (str/includes? m "\"x\""))
+      (testing "and points at the likely cause, since #include is what makes it
+      reachable rather than theoretical"
+        (is (str/includes? m "#include")))))
+  (testing "distinct names are of course fine"
+    (is (nil? (msg {:datasets [{:name "a" :storage :mem :endpoints #{:query}}
+                               {:name "b" :storage :mem :endpoints #{:query}}]})))))
+
 (deftest dataset-names-that-would-break-a-url-are-rejected
   (testing "names become URL path segments"
     (is (str/includes? (msg {:datasets [{:name "a/b" :storage :mem :endpoints #{:query}}]})
@@ -452,6 +467,21 @@
       (is (str/includes? m "does not exist"))
       (is (str/includes? m "nope.edn"))
       (is (str/includes? m dir)))))
+
+(deftest include-works-anywhere-a-value-can-appear
+  (testing "not just in :datasets. A reader tag substitutes a VALUE, so it works
+  at any position by construction rather than by permission — asserting it so
+  that stays a stated property instead of an incidental one someone finds and
+  depends on"
+    (let [dir (with-config-dir
+                {"fuseki.edn" "{:datasets [{:name \"n\" :storage :mem
+                                            :endpoints #include \"eps.edn\"}]
+                                :prefixes #include \"prefixes.edn\"}"
+                 "eps.edn"    "{:query [\"query\" \"\"]}"
+                 "prefixes.edn" "{:ex \"http://example.org/\"}"})
+          cfg (parse-file dir "fuseki.edn")]
+      (is (= [["n" [[:query ["/n/query" "/n"]]]]] (routes-of cfg)))
+      (is (str/includes? (r/edn->ttl cfg) "@prefix ex:")))))
 
 (deftest tags-compose-inside-an-included-file
   (testing "the tags are one set, not a top-level set and a lesser nested one —

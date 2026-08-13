@@ -307,6 +307,21 @@
       (when-not (map? ui) (bad ":ui must be a map, e.g. {:enabled true}"))
       (when-not (boolean? (:enabled ui)) (bad ":ui :enabled must be true or false")))
     (when-not (seq datasets) (bad ":datasets must be a non-empty vector"))
+    ;; Two datasets with one name is the endpoint-ambiguity rule one level up:
+    ;; one path can only mean one thing. Jena does catch it —
+    ;; "FusekiConfigException: Data service name already registered: /x" — but by
+    ;; then we have already printed routes for both, so the boot log advertises
+    ;; datasets that never serve, and Jena's message names neither the file nor
+    ;; which of the two to change. :name is our key, so this is ours to refuse.
+    ;;
+    ;; #include is what makes it reachable rather than theoretical: including the
+    ;; same file twice is a plausible copy-paste, and two files can collide with
+    ;; neither of them looking wrong on its own.
+    (when-let [dupes (seq (for [[n c] (frequencies (keep :name datasets)) :when (> c 1)] n))]
+      (bad "two or more datasets share the name "
+           (str/join " and " (map #(str "\"" % "\"") (sort dupes)))
+           " — each becomes a URL path, and one path can only mean one thing"
+           " (if these came from #include, the same file may be included twice)"))
     (doseq [d datasets]
       (when-not (map? d) (bad "each dataset must be a map, got: " (show d)))
       (check-name (:name d))

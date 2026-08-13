@@ -518,6 +518,17 @@
     (let [out (boot-output {:env {var val}})]
       (is (str/includes? out "FATAL") (str var " pointing nowhere refuses to boot"))
       (is (str/includes? out val) (str var "'s message names the path it was given"))))
+  (testing "two datasets sharing a name fail at OUR layer, before the log has
+  advertised routes that will never serve"
+    (let [dup (fixture "dup.edn"
+                       (str "{:datasets [{:name \"x\" :storage :mem :endpoints #{:query}}"
+                            "            {:name \"x\" :storage :mem :endpoints #{:update}}]}"))
+          out (boot-output {:mounts [(str dup ":/fuseki/fuseki.edn:ro")]})]
+      (is (str/includes? out "share the name") "refused with our message")
+      (is (not (str/includes? out "routes:"))
+          "and refused BEFORE routes are printed — the log must not claim a dataset Jena then rejects")
+      (is (not (str/includes? out "already registered"))
+          "so it never reaches Jena's message, which names neither the file nor which one to change")))
   (testing "while the defaults being absent is still the normal, quiet case"
     (with-container [cid {}]
       (wait-ping)
