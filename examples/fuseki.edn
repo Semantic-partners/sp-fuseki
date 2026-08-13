@@ -23,9 +23,11 @@
  :auth {:mode :anon}
 
  ;; Declared once, emitted into the rendered TTL. Hand-written TTL makes you
- ;; repeat these in every file.
- :prefixes {:ex  "http://example.org/"
-            :geo "http://geo.org/"}
+ ;; repeat these in every file. :text :fields uses these too.
+ :prefixes {:ex   "http://example.org/"
+            :geo  "http://geo.org/"
+            :rdfs "http://www.w3.org/2000/01/rdf-schema#"
+            :skos "http://www.w3.org/2004/02/skos/core#"}
 
  :datasets [;; In-memory: fast, gone on restart.
             {:name "training"
@@ -47,6 +49,24 @@
              :endpoints {:query  ["sparql" "query" ""]
                          :update true
                          :gsp-rw true}}
+
+            ;; Full-text: a Lucene index over the predicates you name, so
+            ;; `?s text:query "salmon"` works instead of FILTER regex, which is
+            ;; unusable at any real size.
+            ;;
+            ;; Note this is a WRAPPER — the rendered TTL is a text:TextDataset
+            ;; containing the tdb2 store plus the index — which is why :text sits
+            ;; beside :storage rather than inside it. The index directory lands
+            ;; under /fuseki/databases for you unless you say otherwise, same as
+            ;; tdb2:location. :text is also the one key here backed by a Jena
+            ;; MODULE, so the entrypoint checks the jar for it at boot.
+            {:name "catalogue"
+             :storage :tdb2
+             :endpoints #{:query :gsp-rw}
+             :text {:default-field :label          ; what a bare text:query searches
+                    :store-values  true
+                    :fields {:label     :rdfs/label
+                             :prefLabel :skos/prefLabel}}}
 
             ;; Inference: an RDFS reasoner over an in-memory base graph. Queries
             ;; see entailed triples, not just the ones you loaded.

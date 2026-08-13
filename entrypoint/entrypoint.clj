@@ -114,6 +114,53 @@
       edn-pw      [edn-pw "fuseki.edn :auth :password"]
       :else       [nil nil])))
 
+;; ---------------------------------------------------------------------------
+;; Module-backed keys — the one place validation can't promise what it usually does
+;; ---------------------------------------------------------------------------
+;;
+;; Every other key denotes CORE assembler vocabulary, present by definition. :text
+;; denotes jena-text, which is a module: a config can be perfectly valid and still
+;; unservable because the classes aren't there. Left alone, that surfaces from Jena
+;; as
+;;
+;;   NoSpecificTypeException: the root file:///fuseki/run/config.effective.ttl#...
+;;   has no most specific type that is a subclass of ja:Object
+;;
+;; which names a node in a file the user never wrote and explains itself via
+;; ja:Object subclassing. There is no path from that back to their fuseki.edn.
+;;
+;; So we probe. By JAR INSPECTION, not Class.forName: Jena isn't on babashka's
+;; classpath — it's handed to a separate java process at exec time — and shelling
+;; out to java to find out would cost a JVM start on every boot.
+(def ^:private module-classes
+  {:text "org/apache/jena/query/text/assembler/TextDatasetAssembler.class"})
+
+(defn jar-has-class?
+  "true / false, or nil when the jar can't be read — which is not the same answer
+  and must not be treated as one."
+  [jar-path entry]
+  (try
+    (with-open [z (java.util.zip.ZipFile. ^String jar-path)]
+      (some? (.getEntry z ^String entry)))
+    (catch Exception _ nil)))
+
+(defn check-modules!
+  "Refuse a config whose module isn't in the jar, while it can still be explained
+  in terms of the key someone wrote."
+  [cfg]
+  (doseq [[k entry] module-classes
+          :when (some k (:datasets cfg))]
+    (case (jar-has-class? jar entry)
+      true  nil
+      false (die (str k " is used by a dataset, but the Jena module that provides it"
+                      " is not in " jar ". The rendered TTL would be valid and Jena"
+                      " would reject it with a message about ja:Object subclassing"
+                      " that names nothing you wrote — so we stop here instead."
+                      " Use a mounted config.ttl, or an image that ships the module."))
+      ;; Unreadable jar is a different answer from "absent", and pretending
+      ;; otherwise would block a working config on our own blindness.
+      (log "NOTE: could not read" jar "to confirm" k "is supported — continuing"))))
+
 (defn- attempt
   "Run f, turning any failure into a clear single-line FATAL rather than a
   Clojure stack trace."
@@ -157,6 +204,7 @@
       ;; The path goes in as well as the text: #include resolves relative to the
       ;; file that wrote it, so a config directory works wherever it's mounted.
       (let [cfg (attempt edn-in #(render/validate! (render/parse (slurp edn-in) edn-in)))]
+        (check-modules! cfg)
         (log "config: rendering" edn-in "-> assembler TTL")
         {:ttl (render-ttl cfg edn-in) :descr (str "rendered from " edn-in)
          :edn cfg :routes (render/routes cfg)})
