@@ -244,6 +244,54 @@ missing. It cannot know the config path, so it is less good, and it costs nothin
 process-wide for anything else using aero in the same JVM — tolerable in a container,
 hostile in the standalone library decision 4 commits us to.
 
+### 5b. Module vocabulary: we validate what we can see, and we say so.
+
+Raised by `:text`, which is not yet built — recorded now because it is a **limit on the
+central promise**, and limits are worth stating before someone discovers them.
+
+Every EDN key so far denotes **core assembler vocabulary**: `fuseki:Service`,
+`tdb2:DatasetTDB2`, `ja:context`. Present by definition in any Fuseki, so validating a
+config against our schema is the same as knowing it will assemble.
+
+`text:` is different. It denotes vocabulary from **jena-text, a module**. It happens to be
+in `fuseki-server.jar` today — verified, our Lucene index answers 102 hits over 41,174 real
+triples — but that is a property of the build, not of Fuseki.
+
+This does **not** break decision 0: `text:` is Jena's vocabulary, not ours. What it breaks
+is subtler and worth naming plainly:
+
+> **"Refuses to boot rather than half-configuring" becomes "refuses to boot for the things we
+> can see."** A `:text` config on a build without jena-text passes our validation and then
+> dies at Jena. We would be certifying a config we cannot confirm is servable.
+
+And the failure it dies with is not one the user can act on. An assembler type Jena does not
+recognise produces:
+
+```
+NoSpecificTypeException: the root file:///fuseki/run/config.effective.ttl#t-wrapped
+has no most specific type that is a subclass of ja:Object
+```
+
+That names a node in a **generated** file the user never wrote, and explains itself in terms
+of `ja:Object` subclassing. Someone whose `fuseki.edn` had a `:text` block would have no path
+from that message back to their own config, let alone to "the image lacks jena-text".
+
+Two honest responses, and they are not exclusive:
+
+1. **Probe at boot.** Before rendering `:text`, check the assembler class resolves; if not,
+   fail with our own message naming the key and the module. Cheap, and it keeps the promise
+   whole for the case we know about.
+2. **State the limit.** Any key whose vocabulary comes from a module carries the caveat that
+   validation cannot confirm availability. Document which keys those are.
+
+**Decision: do (1) for each module-backed key we add, and (2) in the README once such a key
+exists.** (1) alone is a promise we would silently break for the next module; (2) alone
+hands the user the `NoSpecificTypeException` and a doc to read afterwards.
+
+**Tripwire:** the first module-backed key that ships without a boot probe. At that point
+"refuses to boot rather than half-configuring" is no longer true as written and the README
+sentence has to change rather than the behaviour being quietly excused.
+
 ### 6. Every resolved decision gets a logged line naming its source — including routes.
 
 The pattern already exists for `auth`, `ui` and `port`. Extend it to everything resolved,
@@ -273,11 +321,20 @@ chinook config cannot currently be expressed in EDN because of three things:
    as `fuseki:name "sparql"` (`render.clj:56`), so `/ds/query` is a 404. This one bites
    silently and is independent of any extension work.
 
-   **The fix is name control plus root support, NOT moving `:query` to `/ds/query`.** The
-   image is public as of 2026-08-13, so changing the default would move URLs under anyone
-   already running it. Callers that want `/chinook/query` ask for it explicitly; the default
-   stays where it is. This is the first decision where the image having users constrains a
-   correctness fix, and it will not be the last.
+   **The fix is name control plus root support, NOT moving `:query` to `/ds/query`.**
+
+   An earlier draft justified that by back-compatibility — the package went public on
+   2026-08-13, so moving the default would move URLs under existing users. **That reasoning
+   was overruled, and it was wrong: we are the only user, so back-compat is not the
+   constraint.**
+
+   The right reason is decision 0. `sparql` is **Fuseki's** default. Shipping an alias Fuseki
+   does not have would make this an improved Fuseki rather than a notation for one — the same
+   discipline that keeps `#profile` out. Same outcome, and the reason is the part that
+   generalises: the next "wouldn't it be friendlier if…" gets measured against whether Fuseki
+   does it, not against who might break.
+
+   Callers who want `/chinook/query` ask for it explicitly. Ours do.
 
 ## What was verified, and what was not
 
@@ -295,3 +352,22 @@ Run against `ghcr.io/semantic-partners/sp-fuseki:latest` (Jena 6.2.0, arm64, ano
 parses and registers, not that the plugin works. No SHACL anywhere: `jena-shacl` is not in
 `fuseki-server.jar` (0 entries), so validating the rendered graph would be a new dependency,
 which is why it is not proposed here.
+
+Added after `fix/endpoints-include-configdir` (`e3788d3`), all run against a container built
+from that branch:
+
+- our four datasets express through `:endpoints` map form, including **three operations at
+  the root**, which the hand-written TTL relies on: `/chinook/query` 200, `/chinook` 200,
+  `POST` update to `/chinook` 204, `/chinook/data` 200, and `/chinook/sparql` correctly 404
+  because we did not ask for it;
+- `#include` resolves relative to the includer; cycles print the trail, missing includes give
+  the resolved path, depth is capped, and an ambiguous name is refused;
+- `FUSEKI_EDN`, `FUSEKI_CONFIG` and `FUSEKI_SHIRO` set to a nonexistent path each abort
+  rather than falling back to a generated default — **the hole was three variables wide, not
+  one**, and the shiro case was the worst of them because it silently replaced supplied
+  access rules;
+- long values in validation messages truncate at 100 characters with the true length
+  appended, so a mistyped `#include` of a secrets file cannot spill it into a log that
+  travels further than the config does;
+- `text:entityField` is **required by Jena** — an EntityMap without it fails
+  `Failed to find a valid EntityMap` — so it is a constant to emit, not a key to expose.
