@@ -209,30 +209,40 @@ that breaks legitimate absolute-path includes.
 **Tripwire:** the next proposal to adopt a config library wholesale. The question to ask is
 not "how heavy is it" but "how many tags does it bring that denote nothing in Jena's model".
 
-#### `#env` strictness — an improvement, now optional rather than forced
+#### `#env` strictness stays at read time. Moving it to validation: considered, rejected.
 
-Aero's `#env` is `(System/getenv s)` and returns **nil, silently**, where ours throws. That
-was cited as the mitigation aero would have required. With aero rejected, ours keeps throwing
-and there is no nil to catch — so this is no longer forced, and it should not be smuggled in
-as though it were.
-
-It is still worth doing on its own merits, and the trade should be made deliberately:
+Aero's `#env` is `(System/getenv s)` and returns **nil, silently**, where ours throws. An
+earlier draft proposed moving our strictness to validation, because a validator knows the
+config path and can say what the value was *for*:
 
 ```
-:auth :password is nil — #env "FUSEKI_ADMIN_PASSWORD" is not set     (validate-time)
-#env "FUSEKI_ADMIN_PASSWORD" is not set                              (read-time, today)
+:auth :password is nil — #env "FUSEKI_ADMIN_PASSWORD" is not set     (proposed)
+#env "FUSEKI_ADMIN_PASSWORD" is not set                              (today)
 ```
 
-The first says what the value was *for*; the second only says what is missing. But getting it
-means **deliberately weakening the reader** so nil reaches the validator — trading an
-immediate, simple failure for a later, better-informed one. Worth it, in our judgement,
-because a config error the user must map back to a purpose is a worse error. Not free, and
-not a consequence of anything else in this ADR.
+The message really is better. It was proposed as the mitigation aero would have forced; with
+aero rejected it became optional, and on inspection it should not be taken:
 
-Whichever way it goes: **do not implement it by overriding aero's `reader` multimethod** if
-aero is ever adopted. It is a global `defmethod`, so redefining `'env` changes it
-process-wide for anything else using aero in the same JVM — tolerable in a container, hostile
-in the standalone library decision 4 commits us to.
+1. **It trades a guarantee for prose.** The read-time throw *is* the "refuses to boot rather
+   than half-configuring" claim. Weakening it so a later stage can phrase the failure better
+   is backwards.
+2. **It creates a window where the config-that-lies exists by construction.** Between read
+   and validate, nil sits in the map. Nothing looks at it today — which is exactly the shape
+   #12 had.
+3. **The decider: it replaces a rule that cannot be forgotten with one that must be
+   remembered.** The read-time throw is a single rule covering every key, including keys
+   nobody has written yet. Validation-time strictness is per key, so the first key added
+   without a nil check silently accepts nil. In a project whose pitch is that the seams are
+   stated rather than emergent, that is the wrong direction — and it fails open.
+
+The message can be improved without the trade: the reader can say what to do next
+(`#env "X" is not set in the environment — set it, or use #file`) rather than only what is
+missing. It cannot know the config path, so it is less good, and it costs nothing.
+
+**If aero is ever adopted after all:** do not restore strictness by overriding aero's
+`reader` multimethod. It is a global `defmethod`, so redefining `'env` changes it
+process-wide for anything else using aero in the same JVM — tolerable in a container,
+hostile in the standalone library decision 4 commits us to.
 
 ### 6. Every resolved decision gets a logged line naming its source — including routes.
 
