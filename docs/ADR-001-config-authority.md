@@ -288,6 +288,21 @@ Two honest responses, and they are not exclusive:
 exists.** (1) alone is a promise we would silently break for the next module; (2) alone
 hands the user the `NoSpecificTypeException` and a doc to read afterwards.
 
+**The probe is a jar inspection, not a classload — and this matters, because the obvious
+implementation is impossible.** The entrypoint is babashka and Jena is not on its classpath;
+`fuseki-server.jar` is handed to a separate `java` process at exec time. So `Class.forName`
+is unavailable at validation time, and shelling out to `java` to ask would cost a JVM start
+on every boot. Reading the jar as a zip works, in-process, at negligible cost:
+
+```clojure
+(with-open [z (java.util.zip.ZipFile. jar)]
+  (some? (.getEntry z "org/apache/jena/query/text/assembler/TextIndexLuceneAssembler.class")))
+```
+
+Written down because someone reaching for `Class.forName`, finding it impossible from bb, and
+quietly downgrading to documentation-only is precisely the outcome the tripwire below exists
+to catch.
+
 **Tripwire:** the first module-backed key that ships without a boot probe. At that point
 "refuses to boot rather than half-configuring" is no longer true as written and the README
 sentence has to change rather than the behaviour being quietly excused.
@@ -349,9 +364,35 @@ Run against `ghcr.io/semantic-partners/sp-fuseki:latest` (Jena 6.2.0, arm64, ano
   create it root-owned and Fuseki dies `Not writable` (#19).
 
 **Not verified:** the plugin jar was absent, so `ja:context` was inert — this says the config
-parses and registers, not that the plugin works. No SHACL anywhere: `jena-shacl` is not in
-`fuseki-server.jar` (0 entries), so validating the rendered graph would be a new dependency,
-which is why it is not proposed here.
+parses and registers, not that the plugin works.
+
+**Correction — an earlier revision of this ADR said `jena-shacl` is not in
+`fuseki-server.jar` (0 entries) and that a rendered-graph SHACL backstop would therefore be a
+new dependency. That is false, and the method that produced it was broken.** The count came
+from `unzip -l … | grep -c shacl` run inside the image — and `unzip` is not installed there,
+so the command failed and `grep -c` faithfully counted zero lines. Absence of a tool, read as
+absence of evidence. The same `java -cp … org.apache.jena.shacl.cmds.shacl` throwing
+`ClassNotFoundException` seemed to corroborate it; that class really is absent, because the
+CLI entry point is not shipped, and it says nothing about the library.
+
+Measured properly, by enumerating the zip:
+
+```
+total entries in jar: 33736
+org/apache/jena/shacl/       entries: 198
+org/apache/jena/query/text/  entries:  71
+shacl CLI main class present: false
+```
+
+So **SHACL is available and costs no new dependency.** It is still not proposed for *input*
+validation, for the reason given elsewhere — it reports against a graph the user never wrote,
+and the input is EDN. A rendered-graph backstop is cheaper than previously stated, but it is
+not free operationally: bb has no Jena on its classpath, so it would mean a JVM invocation
+or folding the check into the server launch. Worth revisiting on its merits, not on the cost
+figure that was wrong.
+
+The technique that corrected this is the same jar inspection proposed for the module probe in
+5b, which is a reasonable argument for building it.
 
 Added after `fix/endpoints-include-configdir` (`e3788d3`), all run against a container built
 from that branch:
