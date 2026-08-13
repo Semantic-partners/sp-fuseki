@@ -350,6 +350,13 @@ in what Jena 6.2.0 ships. An older leg is only worth publishing if it can be kep
 patched, and that one can't be without Apache re-releasing it. So there is one
 supported Jena at a time, and it is the current one.
 
+Every artifact the build fetches — the Temurin JRE, the Fuseki tarball, babashka —
+is verified against the hash its own publisher ships (`sha256`/`sha512`), because a
+connection reset mid-transfer produces a truncated archive that can still unpack and
+boot. That's integrity, not provenance: the checksum travels the same channel as the
+artifact. [test/dockerfile_test.clj](test/dockerfile_test.clj) fails if a future
+artifact is added without one.
+
 There is no cron — builds run on bumps. Renovate watches Jena via
 Maven Central, and [upstream-check.yml](.github/workflows/upstream-check.yml) runs
 weekly against `archive.apache.org` and opens an issue if a newer Fuseki exists.
