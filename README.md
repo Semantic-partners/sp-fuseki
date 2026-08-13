@@ -298,7 +298,17 @@ IMAGE=sp-fuseki:dev bash test/smoke.sh         # packaging contract, needs Docke
 
 Two layers on purpose. [test/render_test.clj](test/render_test.clj) pins what the
 EDN renders to and every way it refuses — fast enough to run on every edit.
-[test/smoke.sh](test/smoke.sh) proves the container actually behaves that way.
+[test/smoke.clj](test/smoke.clj) proves the container actually behaves that way.
+
+Both layers are babashka. The smoke suite used to be 531 lines of bash and produced
+four defects in a day, none of them logic errors: `docker logs | grep -q` SIGPIPEd
+docker so `pipefail` failed a *successful* assertion; `$(printf '\n')` lost its
+newline so a negative test sent the valid credential; `grep -qv` is vacuously true,
+so a check that a secret wasn't logged would have passed while leaking it. HTTP
+status codes are now integers rather than `-w '%{http_code}'` output, and a string
+containing a newline is just a string. `test/smoke.sh` remains as the entry point,
+and finds `bb` on PATH, in the usual install locations, or — on Linux — copies the
+checksum-verified one out of the image itself, so no extra download is involved.
 
 ### The CI workflow is generated, and tested
 
