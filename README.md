@@ -123,7 +123,7 @@ TTL and mount that instead.
 | `:datasets` | `:name`, `:storage` (`:mem`/`:tdb2`), `:endpoints` (`:query`/`:update`/`:gsp-rw`/`:gsp-r`), `:reasoner` (`:none`/`:rdfs`/`:owl-micro`) |
 | `:prefixes` | keyword → IRI, declared once and emitted into the TTL |
 | `:auth` | `{:mode :anon}` or `{:mode :basic}` |
-| `:server` | `{:port 3030}` |
+| `:server` | `{:port 3030}` — honoured, and the container's healthcheck follows it |
 | `:ui` | `{:enabled true}` |
 | `#env "VAR"` / `#file "path"` | read a secret at boot — it never lives in the config |
 
@@ -195,7 +195,7 @@ regenerated boot files; prefer `/fuseki/databases` for data and mount
 | `FUSEKI_EDN` | `/fuseki/fuseki.edn` | Where to look for a mounted EDN config (used only if no `config.ttl`). |
 | `FUSEKI_TDB2_ROOT` | `/fuseki/databases` | Directory `:tdb2` datasets are rendered under. |
 | `FUSEKI_SHIRO` | `/fuseki/shiro.ini` | Where to look for a mounted shiro.ini. |
-| `FUSEKI_PORT` | `3030` | Listen port. |
+| `FUSEKI_PORT` | `3030` | Listen port. Also settable as `:server {:port n}` in `fuseki.edn`; env wins. The healthcheck follows whichever applied. |
 | `FUSEKI_DATASET` | `ds` | Name of the generated default dataset (when no config mounted). |
 | `FUSEKI_AUTH` | `anon` | `anon` (throwaway/lab) or `basic` (all endpoints require login, except `/$/ping` so the healthcheck works). |
 | `FUSEKI_UI` | `on` | `on` serves Fuseki's own UI + admin area at `/`. `off` runs the headless server — no UI, no admin area, data endpoints unchanged. Same image either way. |

@@ -15,6 +15,7 @@
 ;;   FUSEKI_EDN                   fuseki.edn (rendered to TTL)  (default /fuseki/fuseki.edn)
 ;;   FUSEKI_SHIRO                 shiro.ini                     (default /fuseki/shiro.ini)
 ;;   FUSEKI_PORT                  listen port                   (default 3030)
+;;                                — also settable as :server {:port n} in fuseki.edn
 ;;   FUSEKI_DATASET               default ds name (no config)   (default ds)
 ;;   FUSEKI_AUTH                  anon | basic                  (default anon)
 ;;                                — also settable as :auth {:mode ...} in fuseki.edn
@@ -58,7 +59,10 @@
 (def cfg-in    (env "FUSEKI_CONFIG"     "/fuseki/config.ttl"))
 (def edn-in    (env "FUSEKI_EDN"        "/fuseki/fuseki.edn"))
 (def shiro-in  (env "FUSEKI_SHIRO"      "/fuseki/shiro.ini"))
-(def port      (env "FUSEKI_PORT"       "3030"))
+;; Raw, so "explicitly set" stays distinguishable from "defaulted" — that is what
+;; the precedence rule needs. Resolved in -main, because the EDN may supply it.
+(def env-port     (System/getenv "FUSEKI_PORT"))
+(def port-default "3030")
 (def ds-name   (env "FUSEKI_DATASET"    "ds"))
 (def tdb2-root (env "FUSEKI_TDB2_ROOT"  "/fuseki/databases"))
 
@@ -141,13 +145,19 @@
 
 (defn resolve-setting
   "Env wins when explicitly set, then the EDN, then the default — and log which,
-  because 'why is the UI off' should never need a bisect."
-  [what env-value from-edn default]
-  (let [[v src] (cond env-value        [env-value "env"]
-                      (some? from-edn) [from-edn (str "fuseki.edn " what)]
-                      :else            [default "default"])]
-    (log (str (name what) ":") v (str "(from " src ")"))
-    v))
+  because 'why is the UI off' should never need a bisect.
+
+  `edn-path` names where in the EDN it came from, for settings whose key isn't the
+  same as their name: the port lives at :server :port, so saying \"fuseki.edn
+  :port\" would send a reader looking for a key that doesn't exist."
+  ([what env-value from-edn default]
+   (resolve-setting what env-value from-edn default what))
+  ([what env-value from-edn default edn-path]
+   (let [[v src] (cond env-value        [env-value "env"]
+                       (some? from-edn) [from-edn (str "fuseki.edn " edn-path)]
+                       :else            [default "default"])]
+     (log (str (name what) ":") v (str "(from " src ")"))
+     v)))
 
 (defn ui-from-edn
   "`:ui {:enabled false}` -> \"off\". Nil when the key is absent, which is NOT the
@@ -187,6 +197,7 @@
   (fs/create-dirs base)
   (let [eff-cfg   (str base "/config.effective.ttl")
         eff-shiro (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
+        eff-port  (str base "/port")        ; read by the image's HEALTHCHECK
         {:keys [ttl descr edn]} (resolve-config)
         ;; Both settings come from the ONE parsed config above. They only apply
         ;; when the EDN is the config source — a mounted config.ttl means the EDN
@@ -194,18 +205,34 @@
         ;; worse than ignoring it.
         auth (resolve-setting :auth env-auth (some-> edn :auth :mode name) auth-default)
         ui   (resolve-setting :ui   env-ui   (ui-from-edn edn)             ui-default)
+        ;; `str` because the EDN carries an integer and everything downstream —
+        ;; the --port= argument, the healthcheck file — is text.
+        port (resolve-setting :port env-port (some-> edn :server :port str)
+                              port-default ":server :port")
         shiro (resolve-shiro auth (:auth edn))]
     (spit eff-cfg ttl)
     (spit eff-shiro shiro)
+    ;; The effective PORT, written where the healthcheck can read it. Same
+    ;; principle as the config and shiro above: what actually took effect is on
+    ;; disk. Without this, a port set in fuseki.edn boots fine and is then
+    ;; reported unhealthy, because HEALTHCHECK only knows the env var.
+    (spit eff-port port)
     (log "effective config ->" eff-cfg (str "(" descr ")"))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
+    (log "effective port   ->" eff-port (str "(" port ")"))
     (let [launch (case ui
                    "on"  ["java" "-jar" jar]
                    "off" ["java" "-cp" jar plain-main]
-                   (die "ui must be 'on' or 'off', got:" ui))]
+                   (die "ui must be 'on' or 'off', got:" ui))
+          ;; ONE vector, logged and executed. `log` is println with varargs, so
+          ;; the previous line printed "--port= 3030  --config= ..." — an argv you
+          ;; could not paste, on the one line whose whole job is telling you what
+          ;; ran. It also said "fuseki-server", which is neither `java -jar` nor
+          ;; `java -cp ... FusekiServerPlainCmd`.
+          args   (into launch [(str "--port=" port) (str "--config=" eff-cfg)])]
       (log "ui mode:" (if (= ui "off") "headless — no UI, no admin area" "Fuseki's own UI + admin area"))
-      (log "exec: fuseki-server --port=" port " --config=" eff-cfg)
+      (log "exec:" (str/join " " args))
       ;; exec (not run) so Fuseki is PID 1's child with clean signal handling.
-      (p/exec (into launch [(str "--port=" port) (str "--config=" eff-cfg)])))))
+      (p/exec args))))
 
 (-main)
