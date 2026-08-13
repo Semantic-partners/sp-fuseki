@@ -150,6 +150,16 @@
                            :gsp-rw ["fuseki:gsp-rw" "data"]
                            :gsp-r  ["fuseki:gsp-r"  "get"]})
 
+;; Analyzers that need no parameters, so the keyword is the whole configuration.
+;; Confirmed present in fuseki-server.jar rather than taken from documentation —
+;; jena-text also ships Localized, Configurable and Generic analyzers, which all
+;; take arguments and are therefore a schema of their own. Those are a TTL job
+;; until someone needs them; refusing them by name beats half-supporting them.
+(def ^:private analyzers {:standard           "text:StandardAnalyzer"
+                          :keyword            "text:KeywordAnalyzer"
+                          :simple             "text:SimpleAnalyzer"
+                          :lower-case-keyword "text:LowerCaseKeywordAnalyzer"})
+
 (def ^:private root-route
   "A nil name means the endpoint answers at the dataset root — /ds rather than
   /ds/sparql. In the assembler that is an endpoint with no fuseki:name, which is
@@ -266,6 +276,64 @@
              (str/join " and " (map #(str "\"" % "\"") (sort clashes)))
              " to more than one operation — one path can only mean one thing")))))
 
+(defn- iri-ref
+  "A predicate as the TTL should carry it: a namespaced keyword becomes a prefixed
+  name, a string becomes a full <IRI>. Returns ::bad for anything else.
+
+  Namespaced keywords are the point — :skos/prefLabel reuses the :prefixes you
+  already declared, which is the ergonomic win over hand-written TTL where you
+  repeat the prefix block in every file."
+  [v]
+  (cond
+    (and (keyword? v) (namespace v)) (str (namespace v) ":" (name v))
+    (string? v)                      (str "<" v ">")
+    :else                            ::bad))
+
+(defn- check-text
+  "The text index is the block whose TTL is an RDF list of blank nodes, so it is
+  where the notation pays hardest — and correspondingly where a half-validated
+  config produces the least legible Jena error."
+  [d prefixes]
+  (let [dsn  (:name d)
+        {:keys [directory analyzer store-values default-field fields] :as t} (:text d)]
+    (when-not (map? t) (bad "dataset \"" dsn "\" :text must be a map"))
+    (when-let [unknown (seq (remove #{:directory :analyzer :store-values :default-field :fields} (keys t)))]
+      (bad "dataset \"" dsn "\" :text has unknown key(s) " (str/join ", " (sort unknown))
+           ". Known: :directory, :analyzer, :store-values, :default-field, :fields"))
+    (when-not (and (map? fields) (seq fields))
+      (bad "dataset \"" dsn "\" :text needs :fields — a map of field name to"
+           " predicate, e.g. {:label :rdfs/label}. An index over nothing would"
+           " build cleanly and then never match"))
+    (doseq [[f p] fields]
+      (when-not (keyword? f)
+        (bad "dataset \"" dsn "\" :text :fields keys must be keywords (the field"
+             " name you query by), got: " (show f)))
+      (when (= ::bad (iri-ref p))
+        (bad "dataset \"" dsn "\" :text :fields " f " must be a namespaced keyword"
+             " like :rdfs/label, or a full IRI string — got: " (show p))))
+    ;; A prefix used but not declared renders TTL that Jena refuses to parse, and
+    ;; its message is about the TTL, not about the EDN anyone wrote.
+    (doseq [[f p] fields
+            :when (and (keyword? p) (namespace p))
+            :when (not (contains? prefixes (keyword (namespace p))))]
+      (bad "dataset \"" dsn "\" :text :fields " f " uses prefix \"" (namespace p)
+           "\" which is not in :prefixes — declare it there, or write the full IRI"
+           " as a string"))
+    (when default-field
+      (when-not (contains? fields default-field)
+        (bad "dataset \"" dsn "\" :text :default-field " (show default-field)
+             " is not one of :fields (" (str/join ", " (sort (map str (keys fields)))) ")")))
+    (when (and analyzer (not (contains? analyzers analyzer)))
+      (bad "dataset \"" dsn "\" :text :analyzer must be one of "
+           (str/join ", " (sort (keys analyzers))) ", got: " (show analyzer)
+           " — jena-text's parameterised analyzers (localized, configurable,"
+           " generic) are a config of their own; mount a config.ttl for those"))
+    (when (and (some? store-values) (not (boolean? store-values)))
+      (bad "dataset \"" dsn "\" :text :store-values must be true or false, got: " (show store-values)))
+    (when (and directory (not (string? directory)))
+      (bad "dataset \"" dsn "\" :text :directory must be a path string, or \"mem\""
+           " for an in-memory index, got: " (show directory)))))
+
 (defn validate!
   "Throw with an actionable message, or return the config unchanged."
   [cfg]
@@ -329,6 +397,12 @@
         (bad "dataset \"" (:name d) "\" :storage must be one of "
              (str/join ", " (sort storages)) ", got: " (show (:storage d))))
       (check-endpoints d)
+      (when (:text d) (check-text d (:prefixes cfg)))
+      (when (and (:text d) (:reasoner d) (not= :none (:reasoner d)))
+        (bad "dataset \"" (:name d) "\": :text with :reasoner is not supported"
+             " — whether the index should see entailed triples is a decision we"
+             " haven't made, and guessing it would be a config that lies"
+             " (mount a config.ttl if you need both)"))
       (when-let [r (:reasoner d)]
         (when-not (contains? reasoners r)
           (bad "dataset \"" (:name d) "\" :reasoner must be one of "
@@ -348,9 +422,15 @@
    ["ja"     "http://jena.hpl.hp.com/2005/11/Assembler#"]
    ["tdb2"   "http://jena.apache.org/2016/tdb#"]])
 
-(defn- prefix-lines [prefixes]
-  (let [user (map (fn [[k v]] [(name k) v]) (sort-by key prefixes))]
-    (for [[p iri] (concat base-prefixes user)]
+(defn- prefix-lines
+  "Assembler prefixes always, so the output stands alone; text: only when a
+  dataset actually uses it, because an unused prefix in a file people are told to
+  go and read is noise."
+  [prefixes uses-text?]
+  (let [base (cond-> base-prefixes
+               uses-text? (conj ["text" "http://jena.apache.org/text#"]))
+        user (map (fn [[k v]] [(name k) v]) (sort-by key prefixes))]
+    (for [[p iri] (concat base user)]
       (format "@prefix %-7s <%s> ." (str p ":") iri))))
 
 (defn- endpoint-lines [endpoints]
@@ -372,14 +452,70 @@
          "                        ja:reasoner  [ ja:reasonerURL <" url "> ] ]")
     "[ a ja:MemoryModel ]"))
 
-(defn- dataset-block [{:keys [name storage reasoner]} tdb2-root]
-  (case storage
-    :mem (str "   fuseki:dataset [ a ja:RDFDataset ;\n"
-              "                    ja:defaultGraph " (graph-block reasoner) " ] .")
-    ;; Absolute location under a mount the container can write as uid 1000.
-    ;; Getting this wrong is the "IOException: No such file or directory" trap.
-    :tdb2 (str "   fuseki:dataset [ a tdb2:DatasetTDB2 ;\n"
-               "                    tdb2:location \"" tdb2-root "/" name "\" ] .")))
+(defn- storage-block
+  "The dataset node itself, indented to sit at `indent` columns. Split out from
+  dataset-block because a text index WRAPS this rather than replacing it, and the
+  wrapper needs the same node one level further in."
+  [{:keys [name storage reasoner]} tdb2-root indent]
+  (let [pad (apply str (repeat indent \space))]
+    (case storage
+      :mem (str "[ a ja:RDFDataset ;\n"
+                pad "    ja:defaultGraph " (graph-block reasoner) " ]")
+      ;; Absolute location under a mount the container can write as uid 1000.
+      ;; Getting this wrong is the "IOException: No such file or directory" trap.
+      :tdb2 (str "[ a tdb2:DatasetTDB2 ;\n"
+                 pad "    tdb2:location \"" tdb2-root "/" name "\" ]")))) 
+
+ (defn- text-statements
+  "The text index and entity map, as NAMED top-level resources.
+
+  Not inline blank nodes, and this is not cosmetic: jena-text's
+  EntityDefinitionAssembler reads the entity map by building a query with
+  ParameterizedSparqlString.setIri, so a blank node arrives as a null IRI and the
+  whole config dies with a NullPointerException naming nothing you wrote. Every
+  hand-written example names these for the same reason. <#frag> is Fuseki's own
+  idiom, resolved against the config file, so no invented prefix is needed.
+
+  The text:map is an RDF LIST of blank nodes — the single most miserable thing to
+  write by hand here, and why :text earns a place in the notation at all."
+  [d tdb2-root]
+  (when-let [{:keys [directory analyzer store-values default-field fields]} (:text d)]
+    (let [n      (:name d)
+          dir    (or directory (str tdb2-root "/" n "-lucene"))
+          ;; "mem" is jena-text's in-memory index, a bare literal rather than a
+          ;; file: IRI. Anything else is a directory on disk.
+          dir-tt (if (= dir "mem") "\"mem\"" (str "<file:" dir ">"))
+          deflt  (or default-field (first (sort-by str (keys fields))))
+          entries (for [[f p] (sort-by (comp str key) fields)]
+                    (str "     [ text:field \"" (name f) "\" ; text:predicate " (iri-ref p) " ]"))]
+      (str "<#" n "-textindex> a text:TextIndexLucene ;\n"
+           "   text:directory " dir-tt " ;\n"
+           (when store-values "   text:storeValues true ;\n")
+           "   text:analyzer  [ a " (get analyzers (or analyzer :standard)) " ] ;\n"
+           "   text:entityMap <#" n "-entitymap> .\n"
+           "\n"
+           "<#" n "-entitymap> a text:EntityMap ;\n"
+           "   text:defaultField \"" (name deflt) "\" ;\n"
+           ;; Required by jena-text and never varied in practice: an EntityMap
+           ;; with no text:entityField makes Jena refuse the config outright, and
+           ;; the value is only observable to something reading the Lucene index
+           ;; directly. A constant, not a key.
+           "   text:entityField  \"uri\" ;\n"
+           "   text:map (\n"
+           (str/join "\n" entries) "\n"
+           "   ) .")))) 
+
+ (defn- dataset-block
+  "The fuseki:dataset line. With :text the storage node is WRAPPED in a
+  text:TextDataset rather than replaced — the index sits alongside the real
+  store, which is why :text is a shape change to a dataset and not another key
+  on one."
+  [d tdb2-root]
+  (if (:text d)
+    (str "   fuseki:dataset [ a text:TextDataset ;\n"
+         "                    text:dataset " (storage-block d tdb2-root 20) " ;\n"
+         "                    text:index   <#" (:name d) "-textindex> ] .")
+    (str "   fuseki:dataset " (storage-block d tdb2-root 17) " .")))
 
 (defn- service-block [d tdb2-root]
   (str/join "\n"
@@ -403,9 +539,13 @@
      "# This is the *effective* config Fuseki was handed. Mount your own"
      "# config.ttl instead and it is honoured untouched (and this file is not used)."
      ""]
-    (prefix-lines (:prefixes cfg))
+    (prefix-lines (:prefixes cfg) (boolean (some :text (:datasets cfg))))
     [""]
     (interpose "" (map #(service-block % tdb2-root) (:datasets cfg)))
+    [""]
+    ;; Named, so they come after the services rather than nesting inside them —
+    ;; see text-statements for why they cannot be inline blank nodes.
+    (interpose "" (keep #(text-statements % tdb2-root) (:datasets cfg)))
     [""])))
 
 (defn routes
