@@ -175,19 +175,23 @@ A UI is not one bet, and the RFC originally over-stated the cost. The tiers:
 | Tier | What | Cost | Status |
 |---|---|---|---|
 | **1. Keep Fuseki's own UI** | Don't strip the UI Fuseki ships — `FUSEKI_UI=on`, the default (no `full` tag; see *Variants* above) | ~zero, and it was already there | **shipped in v0.1**, smoke-asserted |
-| **2. Thin CodeMirror web component** | SPARQL editor + **results-as-data** (raw/tabular), built fresh on the CodeMirror config — framework-free, embeddable | ~the old YASGUI-reskin budget, but clean (no wrapper debt) | v0.2 variant |
+| **2. Thin CodeMirror web component** | SPARQL editor + **results-as-data** (raw/tabular), built fresh on the CodeMirror config — framework-free, embeddable | ~the old YASGUI-reskin budget, with no third-party UI dependency to track | v0.2 variant |
 | **3. Fuller bespoke UI** | tier 2 + prefixes / history; possibly a standalone app | more than tier 2; gate is *opportunity cost*, not build difficulty | Bet B, separate |
 
-**Rejected: reskinning YASGUI.** Its only real value is the CodeMirror config;
-the rest is the plugin-hell wrapper you end up fighting. Lift the CodeMirror
-config directly and build a thin shell — skip the wrapper. **Web component, not
+**Rejected: reskinning YASGUI.** Upstream (`TriplyDB/Yasgui`) was archived in
+April 2026 and the maintained line is now a third-generation fork
+(Triply → Zazuko → Matdata). Depending on it would import exactly the
+maintenance question this image exists to answer. The part we'd actually use is
+the CodeMirror SPARQL config anyway; the rest is a plugin surface an image
+doesn't need. Lift the CodeMirror config directly and build a thin shell.
+**Web component, not
 React:** zero framework runtime, portable, CSP-friendly static assets, drop-in
 to the `full` variant or any page, reusable against any endpoint (on-brand "it's
 just data"). React only earns its keep if tier 3 grows into a standalone app.
 
-**No result-viz plugin suite.** YASGUI's other arguable value — canned result
-views (table / geo / chart / pivot) — was worth shipping *pre-LLM*, when bespoke
-viz was expensive. In an LLM world that flips: a good-enough visualisation is a
+**No result-viz plugin suite.** Canned result views (table / geo / chart /
+pivot) were worth bundling *pre-LLM*, when bespoke viz was expensive. In an LLM
+world that flips: a good-enough visualisation is a
 half-day for an agent, on demand, per use. So the UI ships query + results-as-
 data and stops there; visualisation is generated against the API, not bundled.
 **APIs are what matter** — the clean, documented endpoint is the asset; canned
@@ -308,5 +312,6 @@ cleared a real cohort.
 - Naming: settled on **`sp-fuseki`** under the org (avoids implying Apache
   endorsement). Image tag scheme: two-axis (above).
 - UI build: a thin CodeMirror web component (tier 2) likely covers the need;
-  skip YASGUI (you'd only fight its wrapper). Web component over React. Tier 3 is
+  build on the CodeMirror config rather than embedding YASGUI. Web component over
+  React. Tier 3 is
   a "useful couple of days?" call against Lance's bandwidth.

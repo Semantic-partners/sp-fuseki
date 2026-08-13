@@ -208,17 +208,21 @@ figure is inflated. There are three tiers, not one bet:
 | Tier | What | Build cost | Maintenance |
 |---|---|---|---|
 | **1. Keep Fuseki's own UI** | A `full` variant that doesn't strip the webapp Fuseki already ships | ~zero (don't pass the strip flag) | bumps with Jena; Apache maintains it |
-| **2. Thin CodeMirror web component** | SPARQL editor + **results-as-data**, built fresh on the CodeMirror config | ~the old YASGUI-reskin budget, but clean | static assets, no server surface; framework-free |
+| **2. Thin CodeMirror web component** | SPARQL editor + **results-as-data**, built fresh on the CodeMirror config | ~the old YASGUI-reskin budget, with no third-party UI dependency to track | static assets, no server surface; framework-free |
 | **3. Fuller bespoke UI** | tier 2 + prefixes/history; maybe a standalone app | more than tier 2, **not "weeks" by default** | ongoing — the upkeep, not the build, is the cost |
 
-**Rejected: reskinning YASGUI.** Its only real value is the CodeMirror config;
-the rest is the plugin-hell wrapper you fight. Lift the config directly, build a
-thin shell. **Web component over React** for an image-embeddable asset: no
+**Rejected: reskinning YASGUI.** Upstream (`TriplyDB/Yasgui`) was archived in
+April 2026; the maintained line is a third-generation fork (Triply → Zazuko →
+Matdata). Depending on it imports exactly the maintenance question this image
+exists to answer. The part we'd actually use is the CodeMirror SPARQL config
+anyway; the rest is a plugin surface an image doesn't need. Lift the config
+directly, build a thin shell. **Web component over React** for an
+image-embeddable asset: no
 framework runtime, portable, CSP-friendly, drop-in, reusable against any
 endpoint. React only if tier 3 becomes a standalone app.
 
-**No result-viz plugin suite.** YASGUI's canned result views (table/geo/chart/
-pivot) were worth shipping pre-LLM; now a good-enough viz is a half-day for an
+**No result-viz plugin suite.** Canned result views (table/geo/chart/
+pivot) were worth bundling pre-LLM; now a good-enough viz is a half-day for an
 agent, on demand. The UI ships query + results-as-data and stops; viz is
 generated against the API, not bundled. **APIs are the asset** — this reinforces
 the thesis (the documented endpoint is the product; downstream views are cheap).
@@ -238,13 +242,13 @@ solve that; a batteries-included one does. **The UI option may be the
 differentiator, not scope creep.**
 
 Under the documented-contract thesis, the UI is just another **documented,
-tested extension point**: "set this → get the Fuseki UI / YASGUI; here's exactly
+tested extension point**: "set this → get the UI; here's exactly
 what it exposes and how auth interacts." The RFC's `:ui {:enabled …}` seam is the
 right hook for all three tiers.
 
 - **Lean:** `minimal` + `full` (tier 1) variants in v0.1/v0.2 — the RFC already
-  has the variant idea, it just deferred the wrong things. Tier 2 (YASGUI) a
-  considered v0.2 variant. Tier 3 stays Bet B, its own project — it's a
+  has the variant idea, it just deferred the wrong things. Tier 2 (the CodeMirror
+  web component) a considered v0.2 variant. Tier 3 stays Bet B, its own project — it's a
   *product*, not a *seam*.
 - **Caveat:** UI + `:anon` + an exposed update endpoint is a footgun. The UI
   variant must be auth-aware by default (ties to #4).
@@ -295,5 +299,6 @@ right hook for all three tiers.
 9. **Rewrite Why/Goals around the thesis:** the offering is a *documented,
    tested extension contract* (legibility), not EDN. Lead with that.
 10. **Reopen the UI as tiers:** keep Fuseki's own UI in a `full` variant (tier 1,
-    ~free); YASGUI a v0.2 variant (tier 2); greenfield stays Bet B (tier 3).
+    ~free); the CodeMirror web component a v0.2 variant (tier 2); greenfield
+    stays Bet B (tier 3).
     Make the UI a documented, auth-aware extension point.
