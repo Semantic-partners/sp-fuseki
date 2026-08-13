@@ -54,19 +54,38 @@ RUN set -eux; \
     TAG="jdk-$(echo "$V" | sed 's/+/%2B/')"; \
     FILE="OpenJDK21U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
     $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
-    mkdir -p /out/jre; tar -xzf /tmp/jre.tgz -C /out/jre --strip-components=1; rm /tmp/jre.tgz
+    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}.sha256.txt" -o /tmp/jre.sha256; \
+    echo "$(cut -d' ' -f1 /tmp/jre.sha256)  /tmp/jre.tgz" | sha256sum -c -; \
+    mkdir -p /out/jre; tar -xzf /tmp/jre.tgz -C /out/jre --strip-components=1; rm /tmp/jre.tgz /tmp/jre.sha256
 
 # Apache Jena Fuseki (standalone, arch-independent). archive.apache.org is
 # permanent — dlcdn is latest-only and 404s a pinned version once a newer Jena ships.
+#
+# EVERY artifact fetched here is checksum-verified. It used to be only babashka,
+# with a comment explaining why — reasoning that applied at least as strongly to
+# the ~200MB JRE, and to a tarball whose only check was `test -f` on a path a
+# truncated archive can still produce. This stage's own header records two
+# publishes lost to `exit 56`, connection reset MID-TRANSFER: exactly the failure a
+# checksum catches and --retry does not. test/dockerfile_test.clj now fails if a
+# future artifact is added without one.
+#
+# Integrity, not provenance: the checksum travels the same channel as the artifact.
+# Apache also publishes .asc — see issue for whether we want that stronger claim.
 RUN set -eux; \
-    $CURL "https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz" -o /tmp/fuseki.tgz; \
-    mkdir -p /out/fuseki; tar -xzf /tmp/fuseki.tgz -C /out/fuseki --strip-components=1; rm /tmp/fuseki.tgz; \
+    BASE="https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
+    $CURL "$BASE" -o /tmp/fuseki.tgz; \
+    # Apache publishes .sha512 here, not .sha256 (that URL 404s).
+    $CURL "${BASE}.sha512" -o /tmp/fuseki.sha512; \
+    echo "$(cut -d' ' -f1 /tmp/fuseki.sha512)  /tmp/fuseki.tgz" | sha512sum -c -; \
+    mkdir -p /out/fuseki; tar -xzf /tmp/fuseki.tgz -C /out/fuseki --strip-components=1; \
+    rm /tmp/fuseki.tgz /tmp/fuseki.sha512; \
     test -f /out/fuseki/fuseki-server.jar
 
-# babashka — the entrypoint runtime (arch-specific static binary). Verified
-# against the .sha256 the release publishes: this is a GitHub release asset
-# fetched over the network, and a truncated download should fail here rather
-# than produce a broken image.
+# babashka — the entrypoint runtime (arch-specific static binary).
+#
+# NOTE the format difference: bb publishes a BARE hash, so it pairs directly.
+# Jena and Temurin publish "hash␣␣filename" lines, so those two `cut` the hash out
+# and re-pair it against the temp path — see above.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) BB_ARCH=amd64 ;; \
