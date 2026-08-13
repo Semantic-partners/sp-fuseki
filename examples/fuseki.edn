@@ -18,7 +18,8 @@
  :server {:port 3030}
 
  ;; :anon (lab; data open, MUTATING admin API fenced) | :basic (login required).
- ;; FUSEKI_AUTH wins if set. The password never lives here — see #env below.
+ ;; FUSEKI_AUTH wins if set. Optional :user and :password too — the password never
+ ;; lives here as a literal, see the reader tags at the bottom.
  :auth {:mode :anon}
 
  ;; Declared once, emitted into the rendered TTL. Hand-written TTL makes you
@@ -53,9 +54,14 @@
 
 ;; Secrets, without putting a secret in the file:
 ;;
-;;   :auth {:mode :basic :password #env "FUSEKI_ADMIN_PASSWORD"}
+;;   :auth {:mode :basic :user "carol" :password #env "FUSEKI_ADMIN_PASSWORD"}
 ;;   :auth {:mode :basic :password #file "/run/secrets/fuseki-admin"}
 ;;
 ;; Both fail loudly at boot if unset/missing, rather than booting with an empty
 ;; password. #file trims trailing newlines, which is what `echo secret > file`
 ;; and most secret mounts give you.
+;;
+;; Precedence: FUSEKI_ADMIN_PASSWORD / _FILE beat :password here; FUSEKI_ADMIN_USER
+;; beats :user. The boot log names WHICH source supplied the secret, never the
+;; secret. Asserted by smoke §17 — this pair of lines described behaviour the
+;; entrypoint didn't have until it did.

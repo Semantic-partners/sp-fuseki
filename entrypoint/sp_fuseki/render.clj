@@ -87,8 +87,21 @@
       (when-not (and (integer? p) (< 0 p 65536)) (bad ":server :port must be an integer 1-65535, got: " (pr-str p))))
     (when auth
       (when-not (map? auth) (bad ":auth must be a map, e.g. {:mode :anon}"))
+      ;; Unknown keys were silently accepted, which is how :password came to be
+      ;; documented in examples/fuseki.edn and ignored by the entrypoint.
+      (when-let [unknown (seq (remove #{:mode :user :password} (keys auth)))]
+        (bad ":auth has unknown key(s) " (str/join ", " (sort unknown))
+             ". Known: :mode, :user, :password"))
       (when-not (#{:anon :basic} (:mode auth))
-        (bad ":auth :mode must be :anon or :basic, got: " (pr-str (:mode auth)))))
+        (bad ":auth :mode must be :anon or :basic, got: " (pr-str (:mode auth))))
+      (doseq [k [:user :password]]
+        (when-let [v (get auth k)]
+          (when-not (string? v)
+            (bad ":auth " k " must be a string — use #env or #file to read it at boot,"
+                 " so the secret never lives in this file. Got: " (pr-str v)))))
+      (when (and (:password auth) (= :anon (:mode auth)))
+        (bad ":auth :password is set but :mode is :anon — no credentials are used in"
+             " anon mode, so this would silently do nothing")))
     (when prefixes
       (when-not (map? prefixes) (bad ":prefixes must be a map of keyword -> IRI string"))
       (doseq [[k v] prefixes]
