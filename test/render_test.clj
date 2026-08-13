@@ -208,7 +208,22 @@
       (is (= (r/edn->ttl cfg) (r/edn->ttl cfg)))
       (testing "and set-order of :endpoints cannot change the output"
         (is (= (r/edn->ttl {:datasets [{:name "d" :storage :mem :endpoints #{:query :update}}]})
-               (r/edn->ttl {:datasets [{:name "d" :storage :mem :endpoints #{:update :query}}]})))))))
+               (r/edn->ttl {:datasets [{:name "d" :storage :mem :endpoints #{:update :query}}]}))))
+      (testing "nor key-order of the map form"
+        (is (= (r/edn->ttl {:datasets [{:name "d" :storage :mem
+                                        :endpoints {:query "a" :update "b"}}]})
+               (r/edn->ttl {:datasets [{:name "d" :storage :mem
+                                        :endpoints {:update "b" :query "a"}}]}))))
+      (testing "while the order WITHIN one operation is the author's, and kept —
+      a vector has an order and the effective config should read as written"
+        (is (= ["/d/x" "/d/y"]
+               (-> (routes-of {:datasets [{:name "d" :storage :mem
+                                           :endpoints {:query ["x" "y"]}}]})
+                   first second first second)))
+        (is (= ["/d/y" "/d/x"]
+               (-> (routes-of {:datasets [{:name "d" :storage :mem
+                                           :endpoints {:query ["y" "x"]}}]})
+                   first second first second)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; TDB2 — the trap the mount docs exist for
@@ -271,7 +286,12 @@
                      "unknown :endpoints"))
   (testing "a dataset with no endpoints is unreachable, so it's an error"
     (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints #{}}]})
-                       "needs at least one of :endpoints"))))
+                       "needs at least one of :endpoints"))
+    (testing "in either spelling, and when the key is absent entirely"
+      (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints {}}]})
+                         "needs at least one of :endpoints"))
+      (is (str/includes? (msg {:datasets [{:name "d" :storage :mem}]})
+                         "needs at least one of :endpoints")))))
 
 (deftest reasoner-on-tdb2-is-refused-explicitly
   (testing "rather than emitting TTL whose behaviour we haven't decided"
@@ -378,6 +398,39 @@
                "b.edn"        "{:name \"deep\" :storage :mem :endpoints #{:query}}"})]
     (is (= "deep" (-> (parse-file dir "fuseki.edn") :datasets first :name)))))
 
+(defn- include-chain
+  "n files, each including the next, the last holding a dataset. The point of the
+  depth cap is the ACYCLIC runaway — a cycle is caught exactly, by identity, and
+  never reaches it."
+  [n]
+  (with-config-dir
+    (into {"fuseki.edn" "{:datasets [#include \"f0.edn\"]}"}
+          (for [i (range n)]
+            [(str "f" i ".edn")
+             (if (= i (dec n))
+               "{:name \"deep\" :storage :mem :endpoints #{:query}}"
+               (str "#include \"f" (inc i) ".edn\""))]))))
+
+(deftest include-nesting-is-capped
+  (testing "a reasonable chain still works — the cap must not be in the way"
+    (is (= "deep" (-> (parse-file (include-chain 8) "fuseki.edn") :datasets first :name))))
+  (testing "a runaway reports as too deep rather than as a StackOverflowError,
+  which is the whole reason the cap exists alongside cycle detection"
+    (let [m (parse-err (include-chain 14) "fuseki.edn")]
+      (is (str/includes? m "nested more than"))
+      (is (str/includes? m "almost certainly a mistake"))
+      (is (not (str/includes? (str m) "StackOverflow"))))))
+
+(deftest include-resolution-is-relative-at-every-level
+  (testing "not just the top one — an included file in a subdirectory resolves
+  ITS includes against its own directory, which is what makes a config tree
+  movable rather than only a flat directory"
+    (let [dir (with-config-dir
+                {"fuseki.edn"          "{:datasets [#include \"a/one.edn\"]}"
+                 "a/one.edn"           "#include \"b/two.edn\""
+                 "a/b/two.edn"         "{:name \"nested\" :storage :mem :endpoints #{:query}}"})]
+      (is (= "nested" (-> (parse-file dir "fuseki.edn") :datasets first :name))))))
+
 (deftest include-cycles-are-caught-and-name-the-trail
   (testing "a cycle must report as a cycle, not as a StackOverflowError"
     (let [dir (with-config-dir {"a.edn" "{:datasets [#include \"b.edn\"]}"
@@ -399,6 +452,18 @@
       (is (str/includes? m "does not exist"))
       (is (str/includes? m "nope.edn"))
       (is (str/includes? m dir)))))
+
+(deftest tags-compose-inside-an-included-file
+  (testing "the tags are one set, not a top-level set and a lesser nested one —
+  putting the credential in its own included file is the obvious thing to do"
+    (let [dir (with-config-dir
+                {"fuseki.edn" "{:datasets [{:name \"d\" :storage :mem :endpoints #{:query}}]
+                                :auth #include \"auth.edn\"}"
+                 "auth.edn"   "{:mode :basic :user \"carol\" :password #env \"SP_TEST_PW\"}"})]
+      (if (System/getenv "SP_TEST_PW")
+        (is (= "carol" (-> (parse-file dir "fuseki.edn") :auth :user)))
+        (testing "and an unset #env is still loud from inside an include"
+          (is (str/includes? (parse-err dir "fuseki.edn") "is not set in the environment")))))))
 
 (deftest include-takes-a-string
   (let [dir (with-config-dir {"fuseki.edn" "{:datasets [#include :kb]}"})]
