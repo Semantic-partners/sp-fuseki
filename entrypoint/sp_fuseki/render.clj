@@ -128,14 +128,23 @@
 (def ^:private reasoners {:none nil
                           :rdfs      "http://jena.hpl.hp.com/2003/RDFSExptRuleReasoner"
                           :owl-micro "http://jena.hpl.hp.com/2003/OWLMicroFBRuleReasoner"})
-;; operation -> [assembler predicate, Fuseki's conventional endpoint name].
+;; operation -> [assembler predicate, Fuseki's default endpoint name].
 ;;
-;; The conventional names are Fuseki's, not ours — :query is "sparql" because
-;; that is what stock Fuseki serves a query endpoint at. It surprises people
-;; reasonably often (`:query` in the EDN, /ds/query a 404) which is why the
-;; resolved routes are logged at boot and why :endpoints can name them
-;; explicitly. Changing the DEFAULT would silently move the URLs of anyone
-;; already running the published image, so it stays.
+;; These are FUSEKI'S defaults, not ours, and that is the rule rather than an
+;; accident of history. :query is "sparql" because that is what stock Fuseki
+;; serves; a config written here and a config written by hand put the same
+;; dataset at the same URL.
+;;
+;; Serving /ds/query as well was considered and rejected. It removes a real
+;; papercut — writing `:endpoints #{:query}` and finding /ds/query is a 404 —
+;; but it does so by shipping an alias Fuseki doesn't have, and this is a
+;; notation FOR the assembler, not an improved Fuseki. The moment our default
+;; behaviour is better than Fuseki's, the EDN has stopped being a spelling and
+;; started being a product, and everything you learn here stops transferring.
+;;
+;; The papercut is answered instead by the two things below: :endpoints can name
+;; every path explicitly, and the resolved routes are logged at boot, so the
+;; surprise is stated rather than discovered by a 404.
 (def ^:private operations {:query  ["fuseki:query"  "sparql"]
                            :update ["fuseki:update" "update"]
                            :gsp-rw ["fuseki:gsp-rw" "data"]
@@ -151,18 +160,25 @@
 (defn- route-names
   "One :endpoints map value -> the endpoint names it asks for.
 
-  true       -> Fuseki's conventional name for that operation
-  \"foo\"      -> /ds/foo
-  nil or \"\"  -> the dataset root
-  a vector   -> several of the above, in the order written
+  true          -> Fuseki's default name for that operation
+  :foo or \"foo\" -> /ds/foo
+  nil or \"\"     -> the dataset root
+  a vector      -> several of the above, in the order written
+
+  Keywords and strings both work and mean the same thing. Keywords read better
+  and match how the rest of this format spells a known value (:tdb2, :rdfs,
+  :anon); the string form stays because an endpoint name is a URL path segment
+  and a keyword can't spell every legal one. In the TTL both become the same
+  string literal.
 
   Returns ::bad for anything else so validate! can say which dataset and key."
   [op v]
   (let [one (fn [x]
-              (cond (true? x)   (second (operations op))
-                    (nil? x)    root-route
-                    (string? x) (when-not (str/blank? x) x)
-                    :else       ::bad))]
+              (cond (true? x)    (second (operations op))
+                    (nil? x)     root-route
+                    (keyword? x) (name x)
+                    (string? x)  (when-not (str/blank? x) x)
+                    :else        ::bad))]
     (if (vector? v) (mapv one v) [(one v)])))
 
 (defn- endpoint-routes
@@ -184,11 +200,25 @@
 
 (defn- bad [& msg] (throw (ex-info (apply str msg) {:validation true})))
 
+(defn- show
+  "A user value inside an error message, truncated.
+
+  #include is deliberately unconfined, so a mistyped path can pull in a file the
+  author never meant to read — and unlike the file itself, the LOG travels:
+  shipped to a collector, pasted into an issue, printed in CI. `#include
+  \"/etc/passwd\"` should tell you the shape was wrong without reproducing the
+  contents. Naming what's wrong has never required quoting all of it."
+  [v]
+  (let [s (pr-str v)]
+    (if (> (count s) 100)
+      (str (subs s 0 100) "… (" (count s) " chars, truncated)")
+      s)))
+
 (defn- check-name
   "Dataset names become URL path segments, so reject anything that would make a
   broken endpoint rather than emitting TTL that half-works."
   [n]
-  (when-not (string? n) (bad "dataset :name must be a string, got: " (pr-str n)))
+  (when-not (string? n) (bad "dataset :name must be a string, got: " (show n)))
   (when (str/blank? n) (bad "dataset :name must not be blank"))
   (when (re-find #"[/\s?#]" n)
     (bad "dataset :name \"" n "\" must not contain '/', '?', '#' or whitespace"
@@ -205,13 +235,19 @@
       (bad "dataset \"" dsn "\" needs at least one of :endpoints " known))
     (when-let [bad-ops (seq (remove operations (if (map? endpoints) (keys endpoints) endpoints)))]
       (bad "dataset \"" dsn "\" has unknown :endpoints "
-           (str/join ", " (sort (map pr-str bad-ops))) ". Known: " known))
+           (str/join ", " (sort (map show bad-ops))) ". Known: " known))
     (when (map? endpoints)
       (doseq [[op v] endpoints]
         (when (some #{::bad} (route-names op v))
           (bad "dataset \"" dsn "\" :endpoints " op " must be true (Fuseki's"
-               " conventional name), a string, nil for the dataset root, or a"
-               " vector of those — got: " (pr-str v)))))
+               " default name), a keyword or string naming the path, nil for the"
+               " dataset root, or a vector of those — got: " (show v)))))
+    ;; Endpoint names are URL path segments, same as dataset names — reject one
+    ;; that would make a broken route rather than emitting TTL that half-works.
+    (doseq [[op nm] (endpoint-routes endpoints)
+            :when (and nm (re-find #"[/\s?#]" nm))]
+      (bad "dataset \"" dsn "\" :endpoints " op " name \"" nm "\" must not contain"
+           " '/', '?', '#' or whitespace — it becomes a URL path segment"))
     (let [routes (endpoint-routes endpoints)]
       ;; The same operation asked for at the same path twice is redundant rather
       ;; than harmful, but it means the config says something it doesn't mean.
@@ -233,7 +269,7 @@
 (defn validate!
   "Throw with an actionable message, or return the config unchanged."
   [cfg]
-  (when-not (map? cfg) (bad "fuseki.edn must be a map, got: " (pr-str cfg)))
+  (when-not (map? cfg) (bad "fuseki.edn must be a map, got: " (show cfg)))
   (when-let [unknown (seq (remove top-level-keys (keys cfg)))]
     (bad "unknown top-level key(s) " (str/join ", " (sort unknown))
          ". Known: " (str/join ", " (sort top-level-keys))
@@ -244,7 +280,7 @@
   (let [{:keys [server auth prefixes datasets ui]} cfg]
     (when (and server (not (map? server))) (bad ":server must be a map"))
     (when-let [p (:port server)]
-      (when-not (and (integer? p) (< 0 p 65536)) (bad ":server :port must be an integer 1-65535, got: " (pr-str p))))
+      (when-not (and (integer? p) (< 0 p 65536)) (bad ":server :port must be an integer 1-65535, got: " (show p))))
     (when auth
       (when-not (map? auth) (bad ":auth must be a map, e.g. {:mode :anon}"))
       ;; Unknown keys were silently accepted, which is how :password came to be
@@ -253,35 +289,35 @@
         (bad ":auth has unknown key(s) " (str/join ", " (sort unknown))
              ". Known: :mode, :user, :password"))
       (when-not (#{:anon :basic} (:mode auth))
-        (bad ":auth :mode must be :anon or :basic, got: " (pr-str (:mode auth))))
+        (bad ":auth :mode must be :anon or :basic, got: " (show (:mode auth))))
       (doseq [k [:user :password]]
         (when-let [v (get auth k)]
           (when-not (string? v)
             (bad ":auth " k " must be a string — use #env or #file to read it at boot,"
-                 " so the secret never lives in this file. Got: " (pr-str v)))))
+                 " so the secret never lives in this file. Got: " (show v)))))
       (when (and (:password auth) (= :anon (:mode auth)))
         (bad ":auth :password is set but :mode is :anon — no credentials are used in"
              " anon mode, so this would silently do nothing")))
     (when prefixes
       (when-not (map? prefixes) (bad ":prefixes must be a map of keyword -> IRI string"))
       (doseq [[k v] prefixes]
-        (when-not (keyword? k) (bad ":prefixes keys must be keywords, got: " (pr-str k)))
-        (when-not (string? v) (bad ":prefixes values must be IRI strings, got: " (pr-str v)))))
+        (when-not (keyword? k) (bad ":prefixes keys must be keywords, got: " (show k)))
+        (when-not (string? v) (bad ":prefixes values must be IRI strings, got: " (show v)))))
     (when ui
       (when-not (map? ui) (bad ":ui must be a map, e.g. {:enabled true}"))
       (when-not (boolean? (:enabled ui)) (bad ":ui :enabled must be true or false")))
     (when-not (seq datasets) (bad ":datasets must be a non-empty vector"))
     (doseq [d datasets]
-      (when-not (map? d) (bad "each dataset must be a map, got: " (pr-str d)))
+      (when-not (map? d) (bad "each dataset must be a map, got: " (show d)))
       (check-name (:name d))
       (when-not (storages (:storage d))
         (bad "dataset \"" (:name d) "\" :storage must be one of "
-             (str/join ", " (sort storages)) ", got: " (pr-str (:storage d))))
+             (str/join ", " (sort storages)) ", got: " (show (:storage d))))
       (check-endpoints d)
       (when-let [r (:reasoner d)]
         (when-not (contains? reasoners r)
           (bad "dataset \"" (:name d) "\" :reasoner must be one of "
-               (str/join ", " (sort (keys reasoners))) ", got: " (pr-str r))))
+               (str/join ", " (sort (keys reasoners))) ", got: " (show r))))
       (when (and (:reasoner d) (not= :none (:reasoner d)) (= :tdb2 (:storage d)))
         (bad "dataset \"" (:name d) "\": :reasoner on :tdb2 storage is not supported"
              " — inference over a persistent store needs a decision we haven't made"
@@ -358,17 +394,28 @@
     [""])))
 
 (defn routes
-  "The URL paths a config will answer on, as [dataset-name [path ...]] pairs.
+  "What a config will answer on, as [dataset-name [[operation [path ...]] ...]].
 
   A route is a resolved decision exactly like :auth or :port, and an unlogged one
   is how `:endpoints #{:query}` serving /ds/sparql could be a silent 404 for
   someone who reasonably expected /ds/query. Logged at boot for the same reason
-  those are — see entrypoint.clj."
+  those are — see entrypoint.clj.
+
+  Grouped BY OPERATION rather than listed flat, because a flat list of paths
+  half-answers the only question the line exists for. `routes: x -> /x` is true
+  and useless when /x serves query, update and gsp-rw: someone debugging
+  \"why does POST /x fail\" cannot learn from it whether update is at the root.
+  Grouping also fixes the ordering, which was otherwise an artefact of the sort.
+
+  Operations arrive already sorted from endpoint-routes, so partition-by keeps
+  that order rather than reintroducing hash-map arbitrariness."
   [cfg]
   (for [d (:datasets cfg)]
     [(:name d)
-     (distinct (for [[_ nm] (endpoint-routes (:endpoints d))]
-                 (if nm (str "/" (:name d) "/" nm) (str "/" (:name d)))))]))
+     (for [pairs (partition-by first (endpoint-routes (:endpoints d)))]
+       [(ffirst pairs)
+        (distinct (for [[_ nm] pairs]
+                    (if nm (str "/" (:name d) "/" nm) (str "/" (:name d)))))])]))
 
 ;; ---------------------------------------------------------------------------
 ;; shiro.ini rendering — shared by the env-driven and EDN-driven paths, so the

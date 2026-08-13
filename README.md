@@ -153,13 +153,22 @@ unless you ask for it. It surprises people, so **the resolved routes are logged
 at boot**:
 
 ```
-[sp-fuseki] routes: ds -> /ds/sparql /ds/update /ds/data
+[sp-fuseki] routes: ds -> gsp-rw /ds/data | query /ds/sparql | update /ds/update
 ```
 
+Grouped by operation, because the path alone half-answers the question the line
+exists for: `routes: x -> /x` is true and useless when `/x` serves query, update
+*and* gsp-rw at once.
+
 A route is a decision like `:auth` or `:port`, and this is the same rule those
-follow — what took effect is stated, not left to be discovered by a 404. The
-default stays as it is because moving it would silently move the URLs of anyone
-already running the published image.
+follow — what took effect is stated, not left to be discovered by a 404.
+
+**The defaults are Fuseki's defaults, deliberately.** Serving `/ds/query` as well
+would remove the papercut, and it was rejected: it fixes it by shipping an alias
+Fuseki doesn't have. This is a notation *for* the assembler, not an improved
+Fuseki — the moment our defaults are better than Fuseki's, what you learn here
+stops transferring to a config written by hand. So the default matches, and the
+override above is how you get any path you want.
 
 Two operations can share the root (Fuseki dispatches those on the request, which
 is what a bare `fuseki:serviceQuery ""` relies on), but a **named** path claimed

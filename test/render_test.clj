@@ -29,6 +29,11 @@
   (let [norm #(str/trim (str/replace % #"\s+" " "))]
     (str/includes? (norm haystack) (norm needle))))
 
+(defn- routes-of
+  "r/routes with the lazy seqs realised, so failures print readably."
+  [cfg]
+  (mapv (fn [[n ops]] [n (mapv (fn [[op ps]] [op (vec ps)]) ops)]) (r/routes cfg)))
+
 ;; ---------------------------------------------------------------------------
 ;; What the EDN buys you over hand-written TTL
 ;; ---------------------------------------------------------------------------
@@ -68,13 +73,25 @@
 ;; Endpoints: what path a dataset actually answers on
 ;; ---------------------------------------------------------------------------
 
-(deftest the-set-form-uses-fusekis-conventional-names
-  (testing ":query is \"sparql\" because that is what stock Fuseki serves —
-  surprising, load-bearing, and NOT changed here, because moving it would move
-  the URLs of anyone already running the published image"
+(deftest the-defaults-are-fusekis-defaults
+  (testing "one endpoint per operation, at the name stock Fuseki uses — so a
+  config written here and one written by hand put the same dataset at the same
+  URL. Serving /ds/query as well was considered and rejected: it fixes a real
+  papercut by shipping an alias Fuseki doesn't have, and this is a notation FOR
+  the assembler rather than an improved Fuseki"
     (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem :endpoints #{:query}}]})]
       (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"sparql\""))
-      (is (not (str/includes? ttl "fuseki:name \"query\""))))))
+      (is (not (str/includes? ttl "fuseki:name \"query\"")))
+      (is (= 1 (count (re-seq #"fuseki:endpoint" ttl))))))
+  (testing "the papercut is answered by naming paths explicitly, not by a nicer
+  default — this is the override that makes the default affordable"
+    (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem
+                                       :endpoints {:query ["sparql" "query"]}}]})]
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"sparql\""))
+      (is (has? ttl "fuseki:operation fuseki:query ; fuseki:name \"query\""))))
+  (testing "and the dataset root stays opt-in"
+    (let [ttl (r/edn->ttl {:datasets [{:name "ds" :storage :mem :endpoints #{:query}}]})]
+      (is (not (has? ttl "fuseki:endpoint [ fuseki:operation fuseki:query ] ;"))))))
 
 (deftest endpoints-can-be-named-explicitly
   (testing "which is the answer to the surprise above: ask for /ds/query and get it"
@@ -112,6 +129,23 @@
     (is (nil? (msg {:datasets [{:name "kb" :storage :mem
                                 :endpoints {:query nil :gsp-rw nil}}]})))))
 
+(deftest endpoint-names-can-be-keywords-or-strings
+  (testing "keywords match how the rest of the format spells a known value —
+  :tdb2, :rdfs, :anon — and render to the same string literal"
+    (is (= (r/edn->ttl {:datasets [{:name "kb" :storage :mem :endpoints {:query :foo}}]})
+           (r/edn->ttl {:datasets [{:name "kb" :storage :mem :endpoints {:query "foo"}}]}))))
+  (testing "mixed, because a keyword can't spell every legal path segment"
+    (is (= [["kb" [[:query ["/kb/sparql" "/kb/q-2" "/kb"]]]]]
+           (routes-of {:datasets [{:name "kb" :storage :mem
+                                   :endpoints {:query [:sparql "q-2" nil]}}]})))))
+
+(deftest endpoint-names-that-would-break-a-url-are-rejected
+  (testing "same rule as dataset names — it becomes a path segment"
+    (doseq [n ["a/b" "a b" "a?b" "a#b"]]
+      (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints {:query n}}]})
+                         "URL path segment")
+          (str "should reject " (pr-str n))))))
+
 (deftest endpoint-specs-that-cannot-mean-anything-are-refused
   (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints {:query 42}}]})
                      "must be true"))
@@ -140,16 +174,33 @@
 (deftest routes-are-computed-for-the-boot-log
   (testing "a route is a resolved decision, and an unlogged one is a 404 you have
   to go and discover"
-    (is (= [["kb" ["/kb/sparql" "/kb/query" "/kb"]]]
-           (mapv (fn [[n ps]] [n (vec ps)])
-                 (r/routes {:datasets [{:name "kb" :storage :mem
-                                        :endpoints {:query ["sparql" "query" ""]}}]})))))
+    (is (= [["kb" [[:query ["/kb/sparql" "/kb/query" "/kb"]]]]]
+           (routes-of {:datasets [{:name "kb" :storage :mem
+                                   :endpoints {:query ["sparql" "query" ""]}}]}))))
+  (testing "grouped BY OPERATION, because a flat path list half-answers the only
+  question the line exists for — /x serving query, update and gsp-rw all at the
+  root reads as a bare \"/x\" and tells a debugger nothing"
+    (is (= [["x" [[:gsp-rw ["/x"]] [:query ["/x"]] [:update ["/x"]]]]]
+           (routes-of {:datasets [{:name "x" :storage :mem
+                                   :endpoints {:query nil :update nil :gsp-rw nil}}]}))))
   (testing "the default config's routes are reported too — that's where the
   conventional-name surprise bites first"
-    (is (= [["ds" ["/ds/data" "/ds/sparql" "/ds/update"]]]
-           (mapv (fn [[n ps]] [n (vec ps)])
-                 (r/routes {:datasets [{:name "ds" :storage :mem
-                                        :endpoints #{:query :update :gsp-rw}}]}))))))
+    (is (= [["ds" [[:gsp-rw ["/ds/data"]] [:query ["/ds/sparql"]] [:update ["/ds/update"]]]]]
+           (routes-of {:datasets [{:name "ds" :storage :mem
+                                   :endpoints #{:query :update :gsp-rw}}]})))))
+
+(deftest error-messages-truncate-the-value-they-echo
+  (testing "#include is unconfined by design, so a mistyped path can pull in a
+  file the author never meant to read — and unlike the file, the LOG travels.
+  Naming what's wrong doesn't require reproducing all of it"
+    (let [secret (apply str (repeat 40 "root:x:0:0:/bin/bash "))
+          m      (msg {:datasets [secret]})]
+      (is (str/includes? m "truncated"))
+      (is (< (count m) 250) "the message stays a message, not a file dump")
+      (is (not (str/includes? m (subs secret 200))) "the tail is not echoed")))
+  (testing "short values are untouched — this must not make ordinary errors worse"
+    (is (= "dataset \"d\" :storage must be one of :mem, :tdb2, got: :sqlite"
+           (msg {:datasets [{:name "d" :storage :sqlite :endpoints #{:query}}]})))))
 
 (deftest rendering-is-deterministic
   (testing "same EDN renders byte-identical TTL, so the effective config diffs cleanly"

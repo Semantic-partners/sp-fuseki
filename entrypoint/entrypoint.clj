@@ -56,9 +56,18 @@
   (System/exit 1))
 
 (def base      (env "FUSEKI_BASE"       "/fuseki/run"))
-(def cfg-in    (env "FUSEKI_CONFIG"     "/fuseki/config.ttl"))
-(def edn-in    (env "FUSEKI_EDN"        "/fuseki/fuseki.edn"))
-(def shiro-in  (env "FUSEKI_SHIRO"      "/fuseki/shiro.ini"))
+;; Held raw as well as resolved, for the same reason :auth/:ui/:port are: absence
+;; of the DEFAULT path means "no config of that kind, carry on", while absence of
+;; a path someone EXPLICITLY set is an instruction we couldn't honour. Silently
+;; falling through to the generated default there hands you a working server
+;; serving something you didn't ask for — which is the whole bug family this
+;; image exists to close. FUSEKI_ADMIN_PASSWORD_FILE already got this right.
+(def env-cfg   (System/getenv "FUSEKI_CONFIG"))
+(def env-edn-p (System/getenv "FUSEKI_EDN"))
+(def env-shiro (System/getenv "FUSEKI_SHIRO"))
+(def cfg-in    (or env-cfg   "/fuseki/config.ttl"))
+(def edn-in    (or env-edn-p "/fuseki/fuseki.edn"))
+(def shiro-in  (or env-shiro "/fuseki/shiro.ini"))
 ;; Raw, so "explicitly set" stays distinguishable from "defaulted" — that is what
 ;; the precedence rule needs. Resolved in -main, because the EDN may supply it.
 (def env-port     (System/getenv "FUSEKI_PORT"))
@@ -127,6 +136,11 @@
 
   Resolution order is in the header."
   []
+  (doseq [[var path] [["FUSEKI_CONFIG" env-cfg] ["FUSEKI_EDN" env-edn-p]]
+          :when (and path (not (fs/exists? path)))]
+    (die var "is set to" path "but there is no file there."
+         "Refusing to boot rather than silently serving the generated default"
+         "— check the path and the mount."))
   (let [have-ttl (fs/exists? cfg-in)
         have-edn (fs/exists? edn-in)]
     (cond
@@ -185,6 +199,12 @@
   resolved auth mode. `edn-auth` is the EDN's :auth map, if the EDN is the config
   source — it can carry :user and :password as well as :mode."
   [mode edn-auth]
+  ;; Same rule as FUSEKI_CONFIG/FUSEKI_EDN above: an explicitly named shiro.ini
+  ;; that isn't there would otherwise fall through to a GENERATED auth config —
+  ;; quietly replacing the access rules you supplied with ours.
+  (when (and env-shiro (not (fs/exists? env-shiro)))
+    (die "FUSEKI_SHIRO is set to" env-shiro "but there is no file there."
+         "Refusing to boot rather than silently generating auth rules instead."))
   (if (fs/exists? shiro-in)
     (do (log "shiro: honouring mounted" shiro-in "(generated auth settings not used)")
         (slurp shiro-in))
@@ -233,8 +253,13 @@
     ;; Routes are decisions too. `:endpoints #{:query}` serves /ds/sparql because
     ;; that is Fuseki's conventional name — printing the paths turns that from a
     ;; 404 you have to go and discover into a line you already read at boot.
-    (doseq [[ds paths] routes]
-      (log "routes:" ds "->" (str/join " " paths)))
+    ;; Grouped by operation: "what did it wire up" needs the verb as well as the
+    ;; path. A bare "/x" is true and useless when /x serves query, update and
+    ;; gsp-rw at once.
+    (doseq [[ds ops] routes]
+      (log "routes:" ds "->"
+           (str/join " | " (for [[op paths] ops]
+                             (str (name op) " " (str/join " " paths))))))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (log "effective port   ->" eff-port (str "(" port ")"))
     (let [launch (case ui

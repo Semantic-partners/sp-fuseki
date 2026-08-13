@@ -504,8 +504,25 @@
       (wait-ping)
       (let [l (logs cid)]
         (is (str/includes? l "routes:") "routes are logged for the generated default")
-        (is (str/includes? l "/ds/sparql")
-            "so /ds/sparql being the query path is stated, not discovered by 404")))))
+        (is (str/includes? l "query /ds/sparql")
+            "the operation is named alongside the path — a bare path half-answers")))))
+
+(deftest s28-an-explicitly-set-config-path-that-is-missing-is-fatal
+  ;; Absence of the DEFAULT path means "no config of that kind, carry on".
+  ;; Absence of a path someone EXPLICITLY set is an instruction we couldn't
+  ;; honour, and falling through to the generated default hands you a working
+  ;; server serving something you never asked for.
+  (doseq [[var val] [["FUSEKI_EDN" "/cfg/not-here.edn"]
+                     ["FUSEKI_CONFIG" "/cfg/not-here.ttl"]
+                     ["FUSEKI_SHIRO" "/cfg/not-here.ini"]]]
+    (let [out (boot-output {:env {var val}})]
+      (is (str/includes? out "FATAL") (str var " pointing nowhere refuses to boot"))
+      (is (str/includes? out val) (str var "'s message names the path it was given"))))
+  (testing "while the defaults being absent is still the normal, quiet case"
+    (with-container [cid {}]
+      (wait-ping)
+      (is (= 200 (status (str base "/$/ping")))
+          "no config mounted anywhere still boots the generated default"))))
 
 ;; ---------------------------------------------------------------------------
 
