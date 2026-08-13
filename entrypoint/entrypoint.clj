@@ -21,6 +21,8 @@
 ;;   FUSEKI_ADMIN_USER            basic-auth user               (default admin)
 ;;   FUSEKI_ADMIN_PASSWORD        basic-auth secret (env)
 ;;   FUSEKI_ADMIN_PASSWORD_FILE   basic-auth secret (file; e.g. a Docker secret)
+;;                                — or :auth {:user .. :password ..} in fuseki.edn,
+;;                                  with #env/#file so the secret isn't in the file
 ;;   FUSEKI_UI                    on | off                      (default on)
 ;;                                — also settable as :ui {:enabled ...} in fuseki.edn
 ;;
@@ -82,14 +84,22 @@
                :storage :mem
                :endpoints #{:query :update :gsp-rw}}]})
 
-(defn read-secret []
+(defn read-secret
+  "The basic-auth password, and where it came from. Env wins over the EDN, same
+  precedence as every other shared setting.
+
+  `edn-pw` has already had #env/#file resolved by the reader, so by the time it
+  arrives it is a plain string — which is the point of those tags: the secret is
+  read at boot and never written in the config."
+  [edn-pw]
   (let [pw  (System/getenv "FUSEKI_ADMIN_PASSWORD")
         pwf (System/getenv "FUSEKI_ADMIN_PASSWORD_FILE")]
     (cond
-      (and pwf (fs/exists? pwf)) (str/trim (slurp pwf))
+      (and pwf (fs/exists? pwf)) [(str/trim (slurp pwf)) (str "FUSEKI_ADMIN_PASSWORD_FILE " pwf)]
       (and pwf (not (fs/exists? pwf))) (die "FUSEKI_ADMIN_PASSWORD_FILE set but not found:" pwf)
-      pw pw
-      :else nil)))
+      pw          [pw "FUSEKI_ADMIN_PASSWORD"]
+      edn-pw      [edn-pw "fuseki.edn :auth :password"]
+      :else       [nil nil])))
 
 (defn- attempt
   "Run f, turning any failure into a clear single-line FATAL rather than a
@@ -150,18 +160,26 @@
 
 (defn resolve-shiro
   "A mounted shiro.ini is honoured untouched; otherwise generate from the
-  resolved auth mode."
-  [mode]
+  resolved auth mode. `edn-auth` is the EDN's :auth map, if the EDN is the config
+  source — it can carry :user and :password as well as :mode."
+  [mode edn-auth]
   (if (fs/exists? shiro-in)
-    (do (log "shiro: honouring mounted" shiro-in) (slurp shiro-in))
+    (do (log "shiro: honouring mounted" shiro-in "(generated auth settings not used)")
+        (slurp shiro-in))
     (do
       (log "shiro: generating" (str "'" mode "'") "config")
       (case mode
         "anon"  render/shiro-anon
-        "basic" (let [user (env "FUSEKI_ADMIN_USER" "admin")
-                      pw   (read-secret)]
+        "basic" (let [user      (or (System/getenv "FUSEKI_ADMIN_USER")
+                                    (:user edn-auth)
+                                    "admin")
+                      [pw src]  (read-secret (:password edn-auth))]
                   (when-not pw
-                    (die "auth is 'basic' but no FUSEKI_ADMIN_PASSWORD or FUSEKI_ADMIN_PASSWORD_FILE."))
+                    (die (str "auth is 'basic' but no password was given. Set "
+                              "FUSEKI_ADMIN_PASSWORD, or FUSEKI_ADMIN_PASSWORD_FILE, or "
+                              ":auth {:password #env \"...\"} in fuseki.edn.")))
+                  ;; Source, never the value.
+                  (log "auth: basic, user" user "— secret from" src)
                   (attempt "auth" #(render/shiro-basic user pw)))
         (die "auth must be 'anon' or 'basic', got:" mode)))))
 
@@ -176,7 +194,7 @@
         ;; worse than ignoring it.
         auth (resolve-setting :auth env-auth (some-> edn :auth :mode name) auth-default)
         ui   (resolve-setting :ui   env-ui   (ui-from-edn edn)             ui-default)
-        shiro (resolve-shiro auth)]
+        shiro (resolve-shiro auth (:auth edn))]
     (spit eff-cfg ttl)
     (spit eff-shiro shiro)
     (log "effective config ->" eff-cfg (str "(" descr ")"))

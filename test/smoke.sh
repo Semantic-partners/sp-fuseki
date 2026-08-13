@@ -22,6 +22,12 @@
 #  12. settings the EDN carries are HONOURED, not just validated (:ui), and the
 #      resolved value is logged with its source
 #  13. an explicit env var beats the EDN
+#  14. FUSEKI_AUTH=basic: data needs credentials, and the HEALTHCHECK still passes
+#  15. FUSEKI_ADMIN_PASSWORD_FILE works and trims the trailing newline
+#  16. a missing secret file is FATAL, not a silent empty password
+#  17. fuseki.edn can carry :user and a #env secret; the source is logged, the
+#      value is not
+#  18. a mounted shiro.ini is honoured untouched, not merged with generated auth
 #
 # 9-11 cover the EDN path; the renderer's own rules are unit-tested in
 # test/render_test.clj (bash test/unit.sh), which is the faster feedback loop.
@@ -282,5 +288,105 @@ wait_ping "$base"
 root="$(curl -fsS "$base/")" || fail "FUSEKI_UI=on did not override the EDN's :ui false"
 echo "$root" | grep -q 'Apache Jena Fuseki UI' || fail "GET / was not the UI shell"
 pass "env overrides the file, as documented"
+
+drop
+
+# 14-17. CREDENTIALS. Previously untested end to end, while the README documents
+# five separate auth surfaces — and both CVEs found in Jena 6.1.0 were in the auth
+# path (shiro-core, jetty-security). "Verified by hand once" is not coverage.
+echo "[14] FUSEKI_AUTH=basic — data requires credentials, healthcheck still works"
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD=s3cret "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"   # /$/ping is deliberately anon, or the healthcheck can never pass
+code="$(curl -s -o /dev/null -w '%{http_code}' -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "basic auth: unauthenticated query should be 401, got $code"
+pass "unauthenticated query -> 401"
+curl -fsS -u admin:s3cret -X POST -H 'Content-Type: text/turtle' \
+  --data-binary "@${HERE}/sample.ttl" "${base}/ds/data?default" >/dev/null \
+  || fail "basic auth: authenticated POST failed"
+ask="$(curl -fsS -u admin:s3cret -G "${base}/ds/sparql" \
+  --data-urlencode 'query=ASK { <http://example.org/s> <http://example.org/p> <http://example.org/o> }' \
+  -H 'Accept: application/sparql-results+json')"
+echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
+  || fail "basic auth: authenticated round-trip failed; got: $ask"
+pass "authenticated round-trip confirmed"
+# This is the image's own HEALTHCHECK command. Gating /$/ping made every
+# basic-auth container report unhealthy; nothing caught it until it was fixed.
+docker exec "$cid" sh -c 'curl -fsS "http://localhost:3030/$/ping" >/dev/null' \
+  || fail "the HEALTHCHECK command fails under basic auth — containers will go unhealthy"
+pass "HEALTHCHECK command still succeeds under basic auth"
+
+drop
+
+echo "[15] FUSEKI_ADMIN_PASSWORD_FILE — the documented-preferred secret path"
+printf 'filesecret\n' > "${TMP}/pw"   # trailing newline on purpose: secrets arrive this way
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_AUTH=basic \
+  -e FUSEKI_ADMIN_PASSWORD_FILE=/run/secrets/pw \
+  -v "${TMP}/pw:/run/secrets/pw:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -u admin:filesecret -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "password-from-file did not authenticate (newline not trimmed?)"
+pass "secret read from file, newline trimmed"
+# The positive case above is the real proof of trimming (an untrimmed stored
+# secret would have rejected it). This is the paired negative, and it has to build
+# the header by hand: `$(printf '\n')` in a -u argument loses the newline to
+# command substitution, so the first version of this test silently sent the valid
+# credential and "passed" for the wrong reason.
+untrimmed="$(printf 'admin:filesecret\n' | base64 | tr -d '\n')"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Basic ${untrimmed}" \
+  -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "a secret with the trailing newline also authenticated (got $code)"
+pass "the untrimmed form is rejected"
+
+drop
+
+echo "[16] a missing password file is FATAL, not a silent empty password"
+out="$(docker run --rm -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD_FILE=/run/secrets/nope "$IMAGE" 2>&1 || true)"
+echo "$out" | grep -q "FATAL" || fail "missing secret file did not produce FATAL; got: $out"
+echo "$out" | grep -q "not found" || fail "the message did not say the file was missing; got: $out"
+pass "missing secret file -> FATAL naming the path"
+
+echo "[17] fuseki.edn can carry the credential, via #env"
+cat > "${TMP}/auth.edn" <<'EOF'
+{:auth {:mode :basic :user "carol" :password #env "SP_SECRET"}
+ :datasets [{:name "ds" :storage :mem :endpoints #{:query :gsp-rw}}]}
+EOF
+cid="$(docker run -d -p "${PORT}:3030" -e SP_SECRET=fromenvtag \
+  -v "${TMP}/auth.edn:/fuseki/fuseki.edn:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -u carol:fromenvtag -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "EDN :auth {:user :password #env} did not authenticate"
+pass "EDN-supplied user + #env secret authenticate"
+code="$(curl -s -o /dev/null -w '%{http_code}' -u admin:fromenvtag -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "the EDN's :user was ignored (admin worked), got $code"
+pass "EDN :user honoured, not the default"
+logs="$(docker logs "$cid" 2>&1 || true)"
+echo "$logs" | grep -q "secret from fuseki.edn" || fail "the secret's source was not logged"
+# NOT `grep -qv`: that succeeds if ANY line lacks the secret, which is vacuously
+# true and would pass while leaking it. This fails if it appears anywhere.
+if echo "$logs" | grep -q "fromenvtag"; then fail "THE SECRET VALUE WAS LOGGED"; fi
+pass "source logged, value not"
+
+drop
+
+echo "[18] a mounted shiro.ini is honoured untouched"
+cat > "${TMP}/shiro.ini" <<'EOF'
+[main]
+ssl.enabled = false
+[users]
+dave = mountedpw
+[roles]
+[urls]
+/$/ping = anon
+/** = authcBasic
+EOF
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD=ignored \
+  -v "${TMP}/shiro.ini:/fuseki/shiro.ini:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -u dave:mountedpw -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "the mounted shiro.ini was not used"
+pass "the mounted file's user authenticates"
+code="$(curl -s -o /dev/null -w '%{http_code}' -u admin:ignored -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "generated credentials also worked — the mount was merged, not honoured (got $code)"
+pass "generated credentials absent — honoured untouched, not merged"
 
 echo "== smoke PASSED =="

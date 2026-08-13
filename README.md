@@ -201,7 +201,12 @@ regenerated boot files; prefer `/fuseki/databases` for data and mount
 | `FUSEKI_UI` | `on` | `on` serves Fuseki's own UI + admin area at `/`. `off` runs the headless server — no UI, no admin area, data endpoints unchanged. Same image either way. |
 | `FUSEKI_ADMIN_USER` | `admin` | Basic-auth username. |
 | `FUSEKI_ADMIN_PASSWORD` | — | Basic-auth secret, inline. |
-| `FUSEKI_ADMIN_PASSWORD_FILE` | — | Basic-auth secret, read from a file (Docker/K8s secret, vault-agent sink, SOPS output). Preferred over the inline form. |
+| `FUSEKI_ADMIN_PASSWORD_FILE` | — | Basic-auth secret, read from a file (Docker/K8s secret, vault-agent sink, SOPS output). Preferred over the inline form; trailing newline trimmed. |
+
+Credentials can also come from `fuseki.edn` as `:auth {:user … :password #env "…"}`
+or `#file`. Env wins over the file, and the boot log names **which source** supplied
+the secret — never the secret. All five paths (env, `*_FILE`, EDN `#env`, a missing
+file, and a mounted `shiro.ini`) are covered by [smoke.sh](test/smoke.sh) §14–18.
 
 **Secrets are backend-agnostic by design.** The image never bakes in a secrets
 manager: a credential arrives via env, a `*_FILE` path, or your own mounted
