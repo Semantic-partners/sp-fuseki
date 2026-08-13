@@ -202,6 +202,94 @@
     (is (= "dataset \"d\" :storage must be one of :mem, :tdb2, got: :sqlite"
            (msg {:datasets [{:name "d" :storage :sqlite :endpoints #{:query}}]})))))
 
+;; ---------------------------------------------------------------------------
+;; :text — a Lucene index, and the one place a key denotes a MODULE's vocabulary
+;; ---------------------------------------------------------------------------
+
+(def text-cfg
+  {:prefixes {:skos "http://www.w3.org/2004/02/skos/core#"
+              :rdfs "http://www.w3.org/2000/01/rdf-schema#"}
+   :datasets [{:name "kb" :storage :tdb2 :endpoints #{:query}
+               :text {:default-field :label
+                      :store-values true
+                      :fields {:label :rdfs/label :prefLabel :skos/prefLabel}}}]})
+
+(deftest text-wraps-the-store-rather-than-replacing-it
+  (testing "a text index is a WRAPPER — the real dataset survives inside it, which
+  is why :text is a shape change to a dataset rather than another key on one"
+    (let [ttl (r/edn->ttl text-cfg)]
+      (is (has? ttl "fuseki:dataset [ a text:TextDataset ;"))
+      (is (has? ttl "text:dataset [ a tdb2:DatasetTDB2 ;"))
+      (is (str/includes? ttl "tdb2:location \"/fuseki/databases/kb\""))
+      (is (has? ttl "text:index   <#kb-textindex>")))))
+
+(deftest the-index-and-entity-map-are-NAMED-not-blank-nodes
+  (testing "not cosmetic. jena-text's EntityDefinitionAssembler reads the entity
+  map via ParameterizedSparqlString.setIri, so a blank node arrives as a null IRI
+  and the whole config dies with a NullPointerException naming nothing the user
+  wrote. Verified against a real container before this was written"
+    (let [ttl (r/edn->ttl text-cfg)]
+      (is (str/includes? ttl "<#kb-textindex> a text:TextIndexLucene ;"))
+      (is (str/includes? ttl "<#kb-entitymap> a text:EntityMap ;"))
+      (is (str/includes? ttl "text:entityMap <#kb-entitymap>")))))
+
+(deftest the-entity-map-is-an-rdf-list-of-field-predicate-pairs
+  (testing "the block whose TTL is genuinely miserable by hand — this is what
+  :text buys over the escape hatch"
+    (let [ttl (r/edn->ttl text-cfg)]
+      (is (has? ttl "text:field \"label\" ; text:predicate rdfs:label"))
+      (is (has? ttl "text:field \"prefLabel\" ; text:predicate skos:prefLabel"))
+      (is (str/includes? ttl "text:map ("))))
+  (testing "entityField is emitted as a constant — jena-text requires it, refuses
+  the config outright without it, and its value is only observable to something
+  reading the Lucene index directly. Not a key"
+    (is (str/includes? (r/edn->ttl text-cfg) "text:entityField  \"uri\"")))
+  (testing "a full IRI string works where no prefix is declared"
+    (is (has? (r/edn->ttl {:datasets [{:name "d" :storage :mem :endpoints #{:query}
+                                       :text {:fields {:label "http://x/label"}}}]})
+              "text:predicate <http://x/label>"))))
+
+(deftest text-defaults-are-emitted-for-you
+  (testing "the index directory lands under the writable mount, same reasoning as
+  tdb2:location — getting it wrong is the permissions trap, not a config error"
+    (is (str/includes? (r/edn->ttl text-cfg) "text:directory <file:/fuseki/databases/kb-lucene>")))
+  (testing "an explicit directory wins, and \"mem\" is jena-text's in-memory index
+  spelled as a bare literal rather than a file: IRI"
+    (is (str/includes? (r/edn->ttl (assoc-in text-cfg [:datasets 0 :text :directory] "mem"))
+                       "text:directory \"mem\"")))
+  (testing "analyzer defaults to standard"
+    (is (has? (r/edn->ttl text-cfg) "text:analyzer  [ a text:StandardAnalyzer ]")))
+  (testing "the text: prefix appears only when something uses it — an unused
+  prefix in a file people are told to go and read is noise"
+    (is (str/includes? (r/edn->ttl text-cfg) "@prefix text:"))
+    (is (not (str/includes? (r/edn->ttl minimal) "@prefix text:")))))
+
+(deftest text-is-validated-before-jena-sees-it
+  (testing "a prefix used but not declared renders TTL Jena refuses to parse, with
+  a message about the TTL rather than about the EDN anyone wrote"
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints #{:query}
+                                         :text {:fields {:label :rdfs/label}}}]})
+                       "not in :prefixes")))
+  (testing "an index over no fields would build cleanly and never match"
+    (is (str/includes? (msg {:datasets [{:name "d" :storage :mem :endpoints #{:query}
+                                         :text {:fields {}}}]})
+                       "needs :fields")))
+  (testing ":default-field must be one of :fields, or the default matches nothing"
+    (is (str/includes? (msg (assoc-in text-cfg [:datasets 0 :text :default-field] :nope))
+                       "is not one of :fields")))
+  (testing "parameterised analyzers are refused by name rather than half-supported"
+    (is (str/includes? (msg (assoc-in text-cfg [:datasets 0 :text :analyzer] :localized))
+                       ":analyzer must be one of")))
+  (testing "unknown keys in our own namespace are errors, not an escape hatch"
+    (is (str/includes? (msg (assoc-in text-cfg [:datasets 0 :text :storeValues] true))
+                       "unknown key")))
+  (testing ":text with a reasoner is refused rather than guessed — whether the
+  index should see entailed triples is a decision we haven't made"
+    (is (str/includes? (msg (-> text-cfg
+                                (assoc-in [:datasets 0 :storage] :mem)
+                                (assoc-in [:datasets 0 :reasoner] :rdfs)))
+                       "not supported"))))
+
 (deftest rendering-is-deterministic
   (testing "same EDN renders byte-identical TTL, so the effective config diffs cleanly"
     (let [cfg (assoc minimal :prefixes {:z "http://z/" :a "http://a/"})]

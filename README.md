@@ -127,6 +127,63 @@ TTL and mount that instead.
 | `:ui` | `{:enabled true}` |
 | `#env "VAR"` / `#file "path"` | read a secret at boot — it never lives in the config |
 | `#include "path"` | splice in another EDN file, resolved relative to the file that wrote it |
+| `:text` | a Lucene full-text index over chosen predicates — see below |
+
+### Full-text search — `:text`
+
+`FILTER regex(?label, …)` is unusable at any real size. `:text` builds a Lucene
+index over the predicates you name, so you can `?s text:query "chinook"`:
+
+```clojure
+{:prefixes {:skos "http://www.w3.org/2004/02/skos/core#"
+            :rdfs "http://www.w3.org/2000/01/rdf-schema#"}
+ :datasets [{:name "kb" :storage :tdb2 :endpoints #{:query}
+             :text {:default-field :label
+                    :store-values  true
+                    :fields {:label     :rdfs/label
+                             :prefLabel :skos/prefLabel}}}]}
+```
+
+```sparql
+PREFIX text: <http://jena.apache.org/text#>
+SELECT ?s WHERE { ?s text:query "chinook" }              # the default field
+SELECT ?s WHERE { ?s text:query (skos:prefLabel "chinook") }   # one named field
+```
+
+| Key | |
+|---|---|
+| `:fields` | **required** — field name → predicate. A namespaced keyword (`:rdfs/label`) uses your `:prefixes`; a string is a full IRI. |
+| `:default-field` | which field a bare `text:query` searches. Defaults to the first alphabetically — name it if that matters. |
+| `:directory` | index location. Defaults to `<tdb2 root>/<dataset>-lucene`, so it lands on the writable mount for you. `"mem"` for an in-memory index. |
+| `:analyzer` | `:standard` (default), `:keyword`, `:simple`, `:lower-case-keyword` |
+| `:store-values` | keep the literal in the index as well as the term |
+
+**A text index *wraps* a dataset rather than being a property of one** — the
+rendered TTL is a `text:TextDataset` containing your real store plus the index.
+That's why `:text` sits beside `:storage` rather than inside it, and why
+`:reasoner` with `:text` is refused: whether the index should see entailed
+triples is a decision we haven't made, and guessing would be a config that lies.
+
+The generated index and entity map are **named** resources (`<#kb-entitymap>`),
+not blank nodes. That isn't style: jena-text reads the entity map by IRI, and a
+blank node arrives as null and takes the whole config down with a
+`NullPointerException` naming nothing you wrote.
+
+> **`:text` is the one key backed by a Jena *module* rather than core assembler.**
+> Everything else denotes vocabulary that is present by definition; `jena-text`
+> could be absent from a differently-built image. So the entrypoint checks the
+> jar at boot and refuses in terms of the key you wrote. Without that check the
+> failure is Jena's `NoSpecificTypeException` naming a node in a *generated* file
+> and explaining itself via `ja:Object` subclassing — accurate, and no path back
+> to your `fuseki.edn`.
+>
+> This narrows the promise, and the narrowing is deliberate: "refuses to boot
+> rather than half-configuring" becomes "refuses to boot for the things we can
+> see". A module we don't know to probe for is a gap, not a guarantee.
+
+Parameterised analyzers (localized, configurable, generic) are refused by name
+rather than half-supported — they're a configuration of their own. Mount a
+`config.ttl` for those.
 
 ### Endpoints — what path a dataset answers on
 
@@ -412,8 +469,10 @@ with its bundle intact, the mutating admin API fenced under `anon`,
 volume at `/fuseki/databases` surviving a restart, a file mounted into
 `/fuseki/run/configuration` not killing the boot, and the EDN path — rendering,
 real RDFS entailment, TTL-beats-EDN precedence, named and root endpoints
-answering, `#include` splicing a config directory, and both a malformed EDN and a
-missing include failing loudly at boot. It does **not**
+answering, `#include` splicing a config directory, a Lucene index returning real
+hits on every mapped field, the module probe refusing a `:text` config when the
+jar lacks `jena-text`, and both a malformed EDN and a missing include failing
+loudly at boot. It does **not**
 test Jena's correctness; that's Apache's job (see
 [docs/ASSESSMENT.md](docs/ASSESSMENT.md) §6).
 

@@ -507,6 +507,58 @@
         (is (str/includes? l "query /ds/sparql")
             "the operation is named alongside the path — a bare path half-answers")))))
 
+(deftest s29-a-text-index-actually-indexes
+  ;; The whole point of :text is that the rendered TTL works, not that it parses.
+  ;; This loads real triples and asks Lucene for them.
+  (let [edn (fixture "text.edn"
+                     (str "{:prefixes {:skos \"http://www.w3.org/2004/02/skos/core#\""
+                          "            :rdfs \"http://www.w3.org/2000/01/rdf-schema#\"}\n"
+                          " :datasets [{:name \"kb\" :storage :mem"
+                          "             :endpoints {:query [:sparql \"\"] :gsp-rw true}"
+                          "             :text {:store-values true :default-field :label"
+                          "                    :fields {:label :rdfs/label"
+                          "                             :prefLabel :skos/prefLabel}}}]}"))
+        ttl (fixture "text-data.ttl"
+                     (str "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+                          "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .\n"
+                          "<http://ex/1> rdfs:label \"Chinook Salmon\" .\n"
+                          "<http://ex/2> rdfs:label \"Atlantic Herring\" .\n"
+                          "<http://ex/3> skos:prefLabel \"Chinook Wind\" .\n"))
+        pfx (str "PREFIX text: <http://jena.apache.org/text#> "
+                 "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> "
+                 "PREFIX skos: <http://www.w3.org/2004/02/skos/core#> ")]
+    (with-container [cid {:mounts [(str edn ":/fuseki/fuseki.edn:ro")]}]
+      (wait-ping)
+      (is (= 200 (:status (post-ttl (str base "/kb/data?default") ttl))) "triples loaded")
+      (let [ask (fn [q] (ask (str base "/kb/sparql") (str pfx q)))]
+        (is (ask "ASK { <http://ex/1> text:query \"Chinook\" }")
+            "the default field is searchable — a real Lucene hit, not a parse")
+        (testing "every mapped field resolves independently, so the entity map's
+        RDF list is wired and not just syntactically present"
+          (is (ask "ASK { <http://ex/3> text:query (skos:prefLabel \"Chinook\") }"))
+          (is (ask "ASK { <http://ex/1> text:query (rdfs:label \"Salmon\") }")))
+        (testing "and it discriminates — an index that matches everything is not
+        an index"
+          (is (not (ask "ASK { <http://ex/2> text:query \"Chinook\" }")))))
+      (is (exec-ok? cid "sh" "-c" "grep -q '<#kb-entitymap> a text:EntityMap' /fuseki/run/config.effective.ttl")
+          "the entity map is a NAMED resource — a blank node here is a null IRI inside jena-text"))
+    (testing "and when the module ISN'T there, we say so in terms of the key the
+    user wrote, instead of letting Jena report a node in a generated file"
+      ;; A 22-byte empty zip stands in for a jar without jena-text — the probe is
+      ;; a jar inspection, so an empty jar is exactly the "module absent" case.
+      (let [empty-jar (str tmp "/empty.jar")]
+        (java.nio.file.Files/write
+         (.toPath (java.io.File. empty-jar))
+         (byte-array (map unchecked-byte [0x50 0x4b 0x05 0x06 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]))
+         ^"[Ljava.nio.file.OpenOption;" (into-array java.nio.file.OpenOption []))
+        (let [out (boot-output {:env    {"FUSEKI_JAR" "/tmp/empty.jar"}
+                                :mounts [(str edn ":/fuseki/fuseki.edn:ro")
+                                         (str empty-jar ":/tmp/empty.jar:ro")]})]
+          (is (str/includes? out "FATAL") "refuses to boot")
+          (is (str/includes? out ":text") "names the key that needs the module")
+          (is (not (str/includes? out "NoSpecificTypeException"))
+              "and stops before Jena's message about ja:Object subclassing"))))))
+
 (deftest s28-an-explicitly-set-config-path-that-is-missing-is-fatal
   ;; Absence of the DEFAULT path means "no config of that kind, carry on".
   ;; Absence of a path someone EXPLICITLY set is an instruction we couldn't
