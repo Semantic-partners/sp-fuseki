@@ -307,6 +307,46 @@ to catch.
 "refuses to boot rather than half-configuring" is no longer true as written and the README
 sentence has to change rather than the behaviour being quietly excused.
 
+#### What `:text` actually cost, now that it is built
+
+Shipped, probe included. Two things it taught that the vocabulary does not tell you, and one
+question it leaves for the next module.
+
+**A notation for the standard sometimes has to know more than the standard says.** The index
+and entity map **cannot be inline blank nodes**. `jena-text`'s `EntityDefinitionAssembler`
+reads the entity map through `ParameterizedSparqlString.setIri`, so a blank node arrives as a
+null IRI and boot dies:
+
+```
+NullPointerException: Argument to NodeFactory.createURI is null
+  at EntityDefinitionAssembler.open(EntityDefinitionAssembler.java:83)
+```
+
+Inline blank nodes work everywhere else in the assembler, which is exactly why a generator
+gets this wrong — the first implementation rendered them inline, as every other block does,
+and the container died. They have to be named resources, which is why every hand-written
+example you will find names them.
+
+This is a genuine qualification on decision 0. "A notation for the standard" suggests a
+mechanical transform, and mostly it is; here the renderer has to encode a fact about a
+*module's assembler implementation* that no amount of reading the vocabulary would reveal.
+The notation is still not a new standard — but it is not free of target knowledge either, and
+that knowledge is invisible until something dies at boot.
+
+**`:text` with `:reasoner` is refused.** Whether the index should see entailed triples is a
+real decision nobody has made. Refused rather than guessed, consistent with `:reasoner` on
+`:tdb2`. Mount a `config.ttl` if you need both.
+
+**The question for module #2.** `:prefixes` + `:fields` is a context plus compact IRIs — which
+makes this a domain-specific EDN-LD, and that framing is right and deliberately bounded:
+going fully general would destroy the validation that *is* the product (see decision 0's
+rejection of arbitrary triples). But `:text` is the first key mapping a vocabulary we do not
+own, and it cost roughly fifty lines of hand-mapping. Every module after it costs the same.
+
+**Tripwire: module #2.** At that point the question is no longer "should we support this
+module" but "are we hand-mapping a vocabulary per module forever, and is that the business we
+are in". Worth answering deliberately, before the second one is already written.
+
 ### 6. Every resolved decision gets a logged line naming its source — including routes.
 
 The pattern already exists for `auth`, `ui` and `port`. Extend it to everything resolved,
@@ -321,13 +361,16 @@ The mode matters as much as the routes: gated and assisted config carry differen
 guarantees, and a reader cannot otherwise tell whether what they are looking at was checked
 or waved through.
 
-## Gaps this exposes in the EDN (evidence, not decisions)
+## Gaps this exposed in the EDN — all three now closed
 
-Recorded so the work is scoped from a real config rather than a hypothetical. SPOQE's
-chinook config cannot currently be expressed in EDN because of three things:
+Recorded so the work was scoped from a real config rather than a hypothetical. SPOQE's
+chinook config could not be expressed in EDN because of three things. **All three shipped,
+and the full four-dataset config now expresses** — verified against the published image with
+41,174 real triples loaded (see below).
 
-1. **No text index.** `text:TextIndexLucene` plus its entity map — the block whose TTL is an
-   RDF list of blank nodes, and therefore the one with the largest ergonomic payoff.
+1. ~~**No text index.**~~ **Shipped.** `text:TextIndexLucene` plus its entity map — the block
+   whose TTL is an RDF list of blank nodes, and therefore the one with the largest ergonomic
+   payoff. See "What `:text` actually cost" in 5b for the two things it taught.
 2. **No unnamed endpoints.** `endpoint-lines` only ever emits named ones, so an EDN dataset
    does not answer at its root. Confirmed: `/kb/sparql` → 200, `/kb` → 400. SPOQE needs root
    operations because `spoqe load` targets the dataset URL directly — and so does the ES
@@ -412,3 +455,22 @@ from that branch:
   travels further than the config does;
 - `text:entityField` is **required by Jena** — an EntityMap without it fails
   `Failed to find a valid EntityMap` — so it is a constant to emit, not a key to expose.
+
+Final run, against the **published** `ghcr.io/semantic-partners/sp-fuseki:latest` with nothing
+built locally — the whole chinook rig, all four datasets, as `fuseki.edn`:
+
+```
+routes: chinook  -> gsp-rw /chinook/data /chinook | query /chinook/query /chinook | update …
+routes: offshore | tags | batches                     (same shape)
+41,174 triples loaded into chinook
+text:query "love"                    102 hits
+(rdfs:label "love") / (dc:title "love")  102 / 102
+(skos:prefLabel "rock")                5
+"zzzznotaword"                         0     — an index that matches everything is not an index
+```
+
+Those three 102s look like field scoping doing nothing, so they were checked rather than
+accepted: distinct probe terms inserted under each predicate resolve **only** through their
+own field (`(rdfs:label "zebracrossing")` 1, `(dc:title "zebracrossing")` 0, and the
+default field does not see a `dc:title`-only term). The identical counts are the chinook data
+carrying "love" in both predicates on the same entities, not a broken entity map.
