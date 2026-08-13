@@ -126,7 +126,9 @@
     (str out err)))
 
 (defn- fixture [name content]
-  (let [f (str tmp "/" name)] (spit f content) f))
+  ;; Parents created, so a fixture can be nested — #include's whole point is a
+  ;; config directory, which needs one.
+  (let [f (str tmp "/" name)] (fs/create-dirs (fs/parent f)) (spit f content) f))
 
 (def sample-ttl (str here "/sample.ttl"))
 (def inference-ttl (str here "/inference.ttl"))
@@ -445,6 +447,93 @@
       (is (exec-ok? cid "sh" "-c"
                     "grep -q 'tdb2:location \"/fuseki/databases/alt/kb\"' /fuseki/run/config.effective.ttl")
           "FUSEKI_TDB2_ROOT moves rendered tdb2 locations"))))
+
+;; ---------------------------------------------------------------------------
+;; 24-27. endpoint routing, #include, and the configuration/ mount trap
+;; ---------------------------------------------------------------------------
+
+(deftest s24-endpoints-can-be-named-and-can-answer-at-the-root
+  ;; The two live bugs found by the first external migration: :query rendered as
+  ;; "sparql" with no way to ask for anything else, and no way to get an endpoint
+  ;; on the dataset URL itself. Both were silent — a 404 and a 400.
+  (let [edn (fixture "routes.edn"
+                     (str "{:datasets [{:name \"kb\" :storage :mem"
+                          " :endpoints {:query [\"sparql\" \"query\" \"\"]"
+                          "             :gsp-rw true}}]}"))]
+    (with-container [cid {:mounts [(str edn ":/fuseki/fuseki.edn:ro")]}]
+      (wait-ping)
+      (is (ask (str base "/kb/sparql") "ASK {}") "conventional name still answers")
+      (is (ask (str base "/kb/query") "ASK {}") "an explicitly named endpoint answers")
+      (is (ask (str base "/kb") "ASK {}") "the dataset root answers — the unnamed endpoint")
+      (is (str/includes? (logs cid) "/kb/query")
+          "the resolved routes are logged, so a surprising path is read not discovered"))))
+
+(deftest s25-include-splices-config-files
+  ;; #include is ours rather than a config library's: the tag set stays closed,
+  ;; so every tag that works here is one this suite exercises.
+  (let [_    (fixture "parts/kb.edn" "{:name \"kb\" :storage :mem :endpoints #{:query}}")
+        _    (fixture "parts/alt.edn" "{:name \"alt\" :storage :mem :endpoints #{:query}}")
+        top  (fixture "top.edn" "{:datasets [#include \"parts/kb.edn\" #include \"parts/alt.edn\"]}")]
+    (with-container [cid {:mounts [(str top ":/conf/fuseki.edn:ro")
+                                   (str tmp "/parts:/conf/parts:ro")]
+                          :env {"FUSEKI_EDN" "/conf/fuseki.edn"}}]
+      (wait-ping)
+      (is (ask (str base "/kb/sparql") "ASK {}") "first included dataset served")
+      (is (ask (str base "/alt/sparql") "ASK {}") "second included dataset served")))
+  (testing "a missing include is FATAL at boot and says where it looked"
+    (let [broken (fixture "broken.edn" "{:datasets [#include \"nope.edn\"]}")
+          out    (boot-output {:mounts [(str broken ":/fuseki/fuseki.edn:ro")]})]
+      (is (str/includes? out "FATAL") "refuses to boot rather than half-configuring")
+      (is (str/includes? out "does not exist") "and says what was missing"))))
+
+(deftest s26-mounting-into-configuration-does-not-break-the-boot
+  ;; /fuseki/run/configuration is a path Fuseki's own docs send you to. Mounting a
+  ;; file into it made Docker create the missing parent root-owned, and Fuseki
+  ;; died "Not writable" before serving anything — the same class as the
+  ;; /fuseki/databases ownership trap, on a path we hadn't pre-created.
+  (let [extra (fixture "extra.ttl" (slurp config-ttl))]
+    (with-container [cid {:mounts [(str extra ":/fuseki/run/configuration/extra.ttl:ro")]}]
+      (wait-ping)
+      (is (= 200 (status (str base "/$/ping"))) "boots with a file mounted into configuration/")
+      (is (not (str/includes? (logs cid) "Not writable"))
+          "the pre-created directory is owned by uid 1000"))))
+
+(deftest s27-the-default-config-reports-its-routes
+  (testing "the zero-config case is where the conventional-name surprise bites first"
+    (with-container [cid {}]
+      (wait-ping)
+      (let [l (logs cid)]
+        (is (str/includes? l "routes:") "routes are logged for the generated default")
+        (is (str/includes? l "query /ds/sparql")
+            "the operation is named alongside the path — a bare path half-answers")))))
+
+(deftest s28-an-explicitly-set-config-path-that-is-missing-is-fatal
+  ;; Absence of the DEFAULT path means "no config of that kind, carry on".
+  ;; Absence of a path someone EXPLICITLY set is an instruction we couldn't
+  ;; honour, and falling through to the generated default hands you a working
+  ;; server serving something you never asked for.
+  (doseq [[var val] [["FUSEKI_EDN" "/cfg/not-here.edn"]
+                     ["FUSEKI_CONFIG" "/cfg/not-here.ttl"]
+                     ["FUSEKI_SHIRO" "/cfg/not-here.ini"]]]
+    (let [out (boot-output {:env {var val}})]
+      (is (str/includes? out "FATAL") (str var " pointing nowhere refuses to boot"))
+      (is (str/includes? out val) (str var "'s message names the path it was given"))))
+  (testing "two datasets sharing a name fail at OUR layer, before the log has
+  advertised routes that will never serve"
+    (let [dup (fixture "dup.edn"
+                       (str "{:datasets [{:name \"x\" :storage :mem :endpoints #{:query}}"
+                            "            {:name \"x\" :storage :mem :endpoints #{:update}}]}"))
+          out (boot-output {:mounts [(str dup ":/fuseki/fuseki.edn:ro")]})]
+      (is (str/includes? out "share the name") "refused with our message")
+      (is (not (str/includes? out "routes:"))
+          "and refused BEFORE routes are printed — the log must not claim a dataset Jena then rejects")
+      (is (not (str/includes? out "already registered"))
+          "so it never reaches Jena's message, which names neither the file nor which one to change")))
+  (testing "while the defaults being absent is still the normal, quiet case"
+    (with-container [cid {}]
+      (wait-ping)
+      (is (= 200 (status (str base "/$/ping")))
+          "no config mounted anywhere still boots the generated default"))))
 
 ;; ---------------------------------------------------------------------------
 
