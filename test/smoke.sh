@@ -22,6 +22,18 @@
 #  12. settings the EDN carries are HONOURED, not just validated (:ui), and the
 #      resolved value is logged with its source
 #  13. an explicit env var beats the EDN
+#  14. FUSEKI_AUTH=basic: data needs credentials, and the HEALTHCHECK still passes
+#  15. FUSEKI_ADMIN_PASSWORD_FILE works and trims the trailing newline
+#  16. a missing secret file is FATAL, not a silent empty password
+#  17. fuseki.edn can carry :user and a #env secret; the source is logged, the
+#      value is not
+#  18. a mounted shiro.ini is honoured untouched, not merged with generated auth
+#  19. FUSEKI_PORT moves the listener AND the healthcheck follows it
+#  20. fuseki.edn :server {:port n} does the same, with the resolved port written
+#      under FUSEKI_BASE where the HEALTHCHECK reads it
+#  21. an explicit FUSEKI_PORT beats the EDN
+#  22. the 'exec:' boot log prints a pasteable argv
+#  23. every remaining documented env override actually takes effect
 #
 # 9-11 cover the EDN path; the renderer's own rules are unit-tested in
 # test/render_test.clj (bash test/unit.sh), which is the faster feedback loop.
@@ -53,6 +65,23 @@ pass() { echo "  ok: $*"; }
 # spurious "No such container" in a passing run is noise in a suite whose whole
 # point is being readable.
 drop() { for c in "${CIDS[@]:-}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done; CIDS=(); }
+
+# Docker's OWN healthcheck verdict, not a reimplementation of it. Two bugs in two
+# days have been "the container serves fine and is reported unhealthy" (basic auth
+# gating /$/ping; the healthcheck not knowing an EDN-supplied port), so the image's
+# HEALTHCHECK is asserted as the image defines it.
+wait_healthy() {
+  local c="$1" i st
+  for i in $(seq 1 45); do
+    st="$(docker inspect --format '{{.State.Health.Status}}' "$c" 2>/dev/null || echo none)"
+    case "$st" in
+      healthy)   return 0 ;;
+      unhealthy) fail "container reported UNHEALTHY (it may be serving fine on another port)" ;;
+    esac
+    sleep 2
+  done
+  fail "container never became healthy (last status: ${st:-unknown})"
+}
 
 wait_ping() {
   local base="$1" i
@@ -282,5 +311,221 @@ wait_ping "$base"
 root="$(curl -fsS "$base/")" || fail "FUSEKI_UI=on did not override the EDN's :ui false"
 echo "$root" | grep -q 'Apache Jena Fuseki UI' || fail "GET / was not the UI shell"
 pass "env overrides the file, as documented"
+
+drop
+
+# 14-17. CREDENTIALS. Previously untested end to end, while the README documents
+# five separate auth surfaces — and both CVEs found in Jena 6.1.0 were in the auth
+# path (shiro-core, jetty-security). "Verified by hand once" is not coverage.
+echo "[14] FUSEKI_AUTH=basic — data requires credentials, healthcheck still works"
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD=s3cret "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"   # /$/ping is deliberately anon, or the healthcheck can never pass
+code="$(curl -s -o /dev/null -w '%{http_code}' -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "basic auth: unauthenticated query should be 401, got $code"
+pass "unauthenticated query -> 401"
+curl -fsS -u admin:s3cret -X POST -H 'Content-Type: text/turtle' \
+  --data-binary "@${HERE}/sample.ttl" "${base}/ds/data?default" >/dev/null \
+  || fail "basic auth: authenticated POST failed"
+ask="$(curl -fsS -u admin:s3cret -G "${base}/ds/sparql" \
+  --data-urlencode 'query=ASK { <http://example.org/s> <http://example.org/p> <http://example.org/o> }' \
+  -H 'Accept: application/sparql-results+json')"
+echo "$ask" | grep -q '"boolean"[[:space:]]*:[[:space:]]*true' \
+  || fail "basic auth: authenticated round-trip failed; got: $ask"
+pass "authenticated round-trip confirmed"
+# This is the image's own HEALTHCHECK command. Gating /$/ping made every
+# basic-auth container report unhealthy; nothing caught it until it was fixed.
+docker exec "$cid" sh -c 'curl -fsS "http://localhost:3030/$/ping" >/dev/null' \
+  || fail "the HEALTHCHECK command fails under basic auth — containers will go unhealthy"
+pass "HEALTHCHECK command still succeeds under basic auth"
+
+drop
+
+echo "[15] FUSEKI_ADMIN_PASSWORD_FILE — the documented-preferred secret path"
+printf 'filesecret\n' > "${TMP}/pw"   # trailing newline on purpose: secrets arrive this way
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_AUTH=basic \
+  -e FUSEKI_ADMIN_PASSWORD_FILE=/run/secrets/pw \
+  -v "${TMP}/pw:/run/secrets/pw:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -u admin:filesecret -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "password-from-file did not authenticate (newline not trimmed?)"
+pass "secret read from file, newline trimmed"
+# The positive case above is the real proof of trimming (an untrimmed stored
+# secret would have rejected it). This is the paired negative, and it has to build
+# the header by hand: `$(printf '\n')` in a -u argument loses the newline to
+# command substitution, so the first version of this test silently sent the valid
+# credential and "passed" for the wrong reason.
+untrimmed="$(printf 'admin:filesecret\n' | base64 | tr -d '\n')"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Basic ${untrimmed}" \
+  -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "a secret with the trailing newline also authenticated (got $code)"
+pass "the untrimmed form is rejected"
+
+drop
+
+echo "[16] a missing password file is FATAL, not a silent empty password"
+out="$(docker run --rm -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD_FILE=/run/secrets/nope "$IMAGE" 2>&1 || true)"
+echo "$out" | grep -q "FATAL" || fail "missing secret file did not produce FATAL; got: $out"
+echo "$out" | grep -q "not found" || fail "the message did not say the file was missing; got: $out"
+pass "missing secret file -> FATAL naming the path"
+
+echo "[17] fuseki.edn can carry the credential, via #env"
+cat > "${TMP}/auth.edn" <<'EOF'
+{:auth {:mode :basic :user "carol" :password #env "SP_SECRET"}
+ :datasets [{:name "ds" :storage :mem :endpoints #{:query :gsp-rw}}]}
+EOF
+cid="$(docker run -d -p "${PORT}:3030" -e SP_SECRET=fromenvtag \
+  -v "${TMP}/auth.edn:/fuseki/fuseki.edn:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -u carol:fromenvtag -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "EDN :auth {:user :password #env} did not authenticate"
+pass "EDN-supplied user + #env secret authenticate"
+code="$(curl -s -o /dev/null -w '%{http_code}' -u admin:fromenvtag -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "the EDN's :user was ignored (admin worked), got $code"
+pass "EDN :user honoured, not the default"
+logs="$(docker logs "$cid" 2>&1 || true)"
+echo "$logs" | grep -q "secret from fuseki.edn" || fail "the secret's source was not logged"
+# NOT `grep -qv`: that succeeds if ANY line lacks the secret, which is vacuously
+# true and would pass while leaking it. This fails if it appears anywhere.
+if echo "$logs" | grep -q "fromenvtag"; then fail "THE SECRET VALUE WAS LOGGED"; fi
+pass "source logged, value not"
+
+drop
+
+echo "[18] a mounted shiro.ini is honoured untouched"
+cat > "${TMP}/shiro.ini" <<'EOF'
+[main]
+ssl.enabled = false
+[users]
+dave = mountedpw
+[roles]
+[urls]
+/$/ping = anon
+/** = authcBasic
+EOF
+cid="$(docker run -d -p "${PORT}:3030" -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD=ignored \
+  -v "${TMP}/shiro.ini:/fuseki/shiro.ini:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+curl -fsS -u dave:mountedpw -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "the mounted shiro.ini was not used"
+pass "the mounted file's user authenticates"
+code="$(curl -s -o /dev/null -w '%{http_code}' -u admin:ignored -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}')"
+[ "$code" = "401" ] || fail "generated credentials also worked — the mount was merged, not honoured (got $code)"
+pass "generated credentials absent — honoured untouched, not merged"
+
+drop
+
+# 19-20. THE PORT. smoke.sh mapped -p "${PORT}:3030" in every container it started,
+# so the container-side port was hardcoded in all 13 run lines — which is precisely
+# why it could not see that :server {:port n} was validated, documented, shipped in
+# the example, and read by nothing (issue #12). The default masked it too: the
+# example ships 3030, which is also the default.
+ALT=8080
+echo "[19] FUSEKI_PORT moves the listener, and the healthcheck follows it"
+cid="$(docker run -d -p "${PORT}:${ALT}" -e FUSEKI_PORT="$ALT" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+pass "listening on ${ALT} (host ${PORT})"
+curl -fsS -X POST -H 'Content-Type: text/turtle' \
+  --data-binary "@${HERE}/sample.ttl" "${base}/ds/data?default" >/dev/null \
+  || fail "non-default port: POST failed"
+pass "data round-trip on a non-default port"
+wait_healthy "$cid"
+pass "docker reports healthy — HEALTHCHECK followed the port"
+
+drop
+
+echo "[20] fuseki.edn :server {:port n} is honoured, and the healthcheck follows it"
+cat > "${TMP}/port.edn" <<EOF
+{:server {:port ${ALT}}
+ :datasets [{:name "ds" :storage :mem :endpoints #{:query :gsp-rw}}]}
+EOF
+cid="$(docker run -d -p "${PORT}:${ALT}" -v "${TMP}/port.edn:/fuseki/fuseki.edn:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+pass "listening on the EDN's port with no FUSEKI_PORT set"
+curl -fsS -G "${base}/ds/sparql" --data-urlencode 'query=ASK {}' >/dev/null \
+  || fail "EDN port: query failed"
+pass "queries answered"
+# The half of the fix that would otherwise regress in silence: a container serving
+# on 8080 while HEALTHCHECK probes 3030 boots fine and is marked unhealthy.
+wait_healthy "$cid"
+pass "docker reports healthy — HEALTHCHECK read the resolved port, not the env"
+logs="$(docker logs "$cid" 2>&1 || true)"
+echo "$logs" | grep -qE "port: ${ALT} \(from fuseki.edn" \
+  || fail "resolved port and source not logged; got: $(echo "$logs" | grep -i 'port' || true)"
+pass "resolved value logged with its source"
+docker exec "$cid" sh -c "grep -qx '${ALT}' \"\${FUSEKI_BASE}/port\"" \
+  || fail "the effective port was not written under FUSEKI_BASE"
+pass "effective port written where the healthcheck reads it"
+
+drop
+
+echo "[21] an explicit FUSEKI_PORT beats the EDN"
+cid="$(docker run -d -p "${PORT}:9090" -e FUSEKI_PORT=9090 \
+  -v "${TMP}/port.edn:/fuseki/fuseki.edn:ro" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+pass "env won over the EDN (9090, not ${ALT})"
+
+drop
+
+echo "[22] the exec log prints a pasteable argv"
+cid="$(docker run -d -p "${PORT}:3030" "$IMAGE")"; CIDS+=("$cid")
+wait_ping "$base"
+logs="$(docker logs "$cid" 2>&1 || true)"
+# `log` is println with varargs, so "--port=" port printed "--port= 3030".
+if echo "$logs" | grep -qE -- "--port= |--config= "; then
+  fail "the exec log has a space after '=' — it prints an argv you cannot paste"
+fi
+echo "$logs" | grep -qE -- "exec: java .*--port=3030 --config=/fuseki/run/config.effective.ttl" \
+  || fail "the exec log does not show the real argv; got: $(echo "$logs" | grep -i 'exec:' || true)"
+pass "exec line shows the actual java argv, no stray spaces"
+
+drop
+
+# 23. Every remaining documented override, exercised once against a container.
+#
+# Not because any is suspected — all seven were probed by hand and work. Because
+# "documented and never executed" was the exact state of :server :port,
+# :ui {:enabled}, and :auth :password, and THREE OF THOSE THREE were wrong. The
+# README is a promise; this section is the part that makes it falsifiable.
+echo "[23] every documented override does what the README says"
+printf '{:datasets [{:name "alt" :storage :mem :endpoints #{:query :gsp-rw}}]}\n' > "${TMP}/alt.edn"
+printf '{:datasets [{:name "kb" :storage :tdb2 :endpoints #{:query :gsp-rw}}]}\n' > "${TMP}/tdb2.edn"
+printf '[main]\nssl.enabled = false\n[users]\nzed = zpw\n[roles]\n[urls]\n/$/ping = anon\n/** = authcBasic\n' > "${TMP}/alt-shiro.ini"
+
+knob() {                      # knob <label> <check> -- <docker run args...>
+  local label="$1" chk="$2"; shift 3
+  local c; c="$(docker run -d -p "${PORT}:3030" "$@" "$IMAGE")"; CIDS+=("$c")
+  wait_ping "$base"
+  eval "$chk" >/dev/null 2>&1 || fail "${label} did not take effect"
+  pass "$label"
+  docker rm -f "$c" >/dev/null 2>&1; CIDS=()
+}
+
+knob "FUSEKI_DATASET renames the generated dataset" \
+  'curl -fsS -G "${base}/kb/sparql" --data-urlencode "query=ASK {}"' \
+  -- -e FUSEKI_DATASET=kb
+
+knob "FUSEKI_ADMIN_USER sets the basic-auth user" \
+  'curl -fsS -u carol:pw -G "${base}/ds/sparql" --data-urlencode "query=ASK {}"' \
+  -- -e FUSEKI_AUTH=basic -e FUSEKI_ADMIN_PASSWORD=pw -e FUSEKI_ADMIN_USER=carol
+
+knob "FUSEKI_CONFIG reads a config.ttl from elsewhere" \
+  'curl -fsS -G "${base}/training/sparql" --data-urlencode "query=ASK {}"' \
+  -- -e FUSEKI_CONFIG=/alt/config.ttl -v "$(cd "$HERE/.." && pwd)/examples/config.ttl:/alt/config.ttl:ro"
+
+knob "FUSEKI_EDN reads a fuseki.edn from elsewhere" \
+  'curl -fsS -G "${base}/alt/sparql" --data-urlencode "query=ASK {}"' \
+  -- -e FUSEKI_EDN=/alt/f.edn -v "${TMP}/alt.edn:/alt/f.edn:ro"
+
+knob "FUSEKI_SHIRO reads a shiro.ini from elsewhere" \
+  'curl -fsS -u zed:zpw -G "${base}/ds/sparql" --data-urlencode "query=ASK {}"' \
+  -- -e FUSEKI_SHIRO=/alt/s.ini -v "${TMP}/alt-shiro.ini:/alt/s.ini:ro"
+
+knob "FUSEKI_BASE relocates the runtime dir" \
+  'curl -fsS -G "${base}/ds/sparql" --data-urlencode "query=ASK {}"' \
+  -- -e FUSEKI_BASE=/fuseki/alt-run
+
+knob "FUSEKI_TDB2_ROOT moves rendered tdb2 locations" \
+  'docker exec "$c" grep -q "tdb2:location \"/fuseki/databases/alt/kb\"" /fuseki/run/config.effective.ttl' \
+  -- -e FUSEKI_TDB2_ROOT=/fuseki/databases/alt -v "${TMP}/tdb2.edn:/fuseki/fuseki.edn:ro"
 
 echo "== smoke PASSED =="
