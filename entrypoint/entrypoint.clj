@@ -56,9 +56,18 @@
   (System/exit 1))
 
 (def base      (env "FUSEKI_BASE"       "/fuseki/run"))
-(def cfg-in    (env "FUSEKI_CONFIG"     "/fuseki/config.ttl"))
-(def edn-in    (env "FUSEKI_EDN"        "/fuseki/fuseki.edn"))
-(def shiro-in  (env "FUSEKI_SHIRO"      "/fuseki/shiro.ini"))
+;; Held raw as well as resolved, for the same reason :auth/:ui/:port are: absence
+;; of the DEFAULT path means "no config of that kind, carry on", while absence of
+;; a path someone EXPLICITLY set is an instruction we couldn't honour. Silently
+;; falling through to the generated default there hands you a working server
+;; serving something you didn't ask for — which is the whole bug family this
+;; image exists to close. FUSEKI_ADMIN_PASSWORD_FILE already got this right.
+(def env-cfg   (System/getenv "FUSEKI_CONFIG"))
+(def env-edn-p (System/getenv "FUSEKI_EDN"))
+(def env-shiro (System/getenv "FUSEKI_SHIRO"))
+(def cfg-in    (or env-cfg   "/fuseki/config.ttl"))
+(def edn-in    (or env-edn-p "/fuseki/fuseki.edn"))
+(def shiro-in  (or env-shiro "/fuseki/shiro.ini"))
 ;; Raw, so "explicitly set" stays distinguishable from "defaulted" — that is what
 ;; the precedence rule needs. Resolved in -main, because the EDN may supply it.
 (def env-port     (System/getenv "FUSEKI_PORT"))
@@ -115,12 +124,23 @@
   (attempt source #(render/edn->ttl cfg {:source source :tdb2-root tdb2-root})))
 
 (defn resolve-config
-  "Returns {:ttl :descr :edn}. The EDN is parsed ONCE and handed back, so the
-  settings it carries (:auth, :ui) come from the same value we rendered — reading
-  the file twice invited the two to disagree.
+  "Returns {:ttl :descr :edn :routes}. The EDN is parsed ONCE and handed back, so
+  the settings it carries (:auth, :ui) come from the same value we rendered —
+  reading the file twice invited the two to disagree.
+
+  `:routes` is separate from `:edn` on purpose. It's present whenever we rendered
+  the config ourselves — including the built-in default, which is exactly where
+  the /ds/sparql-not-/ds/query surprise bites hardest — while `:edn` stays
+  strictly \"the user mounted an EDN\", because that is what the :auth/:ui
+  precedence rule keys off.
 
   Resolution order is in the header."
   []
+  (doseq [[var path] [["FUSEKI_CONFIG" env-cfg] ["FUSEKI_EDN" env-edn-p]]
+          :when (and path (not (fs/exists? path)))]
+    (die var "is set to" path "but there is no file there."
+         "Refusing to boot rather than silently serving the generated default"
+         "— check the path and the mount."))
   (let [have-ttl (fs/exists? cfg-in)
         have-edn (fs/exists? edn-in)]
     (cond
@@ -129,19 +149,25 @@
             (log "NOTE:" edn-in "is present but IGNORED —" cfg-in
                  "wins. A mounted config.ttl is always honoured untouched."))
           (log "config: honouring mounted" cfg-in)
-          {:ttl (slurp cfg-in) :descr (str "mounted " cfg-in) :edn nil})
+          ;; No :routes — the TTL is honoured untouched and we don't parse it, so
+          ;; we genuinely don't know. Saying nothing beats guessing.
+          {:ttl (slurp cfg-in) :descr (str "mounted " cfg-in) :edn nil :routes nil})
 
       have-edn
-      (let [cfg (attempt edn-in #(render/validate! (render/parse (slurp edn-in))))]
+      ;; The path goes in as well as the text: #include resolves relative to the
+      ;; file that wrote it, so a config directory works wherever it's mounted.
+      (let [cfg (attempt edn-in #(render/validate! (render/parse (slurp edn-in) edn-in)))]
         (log "config: rendering" edn-in "-> assembler TTL")
-        {:ttl (render-ttl cfg edn-in) :descr (str "rendered from " edn-in) :edn cfg})
+        {:ttl (render-ttl cfg edn-in) :descr (str "rendered from " edn-in)
+         :edn cfg :routes (render/routes cfg)})
 
       :else
       (do (log "config: no file at" cfg-in "or" edn-in
                "— generating default in-memory dataset /" ds-name)
           {:ttl (render-ttl (default-edn) "the built-in default")
            :descr "generated default"
-           :edn nil}))))
+           :edn nil
+           :routes (render/routes (default-edn))}))))
 
 (defn resolve-setting
   "Env wins when explicitly set, then the EDN, then the default — and log which,
@@ -173,6 +199,12 @@
   resolved auth mode. `edn-auth` is the EDN's :auth map, if the EDN is the config
   source — it can carry :user and :password as well as :mode."
   [mode edn-auth]
+  ;; Same rule as FUSEKI_CONFIG/FUSEKI_EDN above: an explicitly named shiro.ini
+  ;; that isn't there would otherwise fall through to a GENERATED auth config —
+  ;; quietly replacing the access rules you supplied with ours.
+  (when (and env-shiro (not (fs/exists? env-shiro)))
+    (die "FUSEKI_SHIRO is set to" env-shiro "but there is no file there."
+         "Refusing to boot rather than silently generating auth rules instead."))
   (if (fs/exists? shiro-in)
     (do (log "shiro: honouring mounted" shiro-in "(generated auth settings not used)")
         (slurp shiro-in))
@@ -198,7 +230,7 @@
   (let [eff-cfg   (str base "/config.effective.ttl")
         eff-shiro (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
         eff-port  (str base "/port")        ; read by the image's HEALTHCHECK
-        {:keys [ttl descr edn]} (resolve-config)
+        {:keys [ttl descr edn routes]} (resolve-config)
         ;; Both settings come from the ONE parsed config above. They only apply
         ;; when the EDN is the config source — a mounted config.ttl means the EDN
         ;; was ignored wholesale, and half-honouring an ignored file would be
@@ -218,6 +250,16 @@
     ;; reported unhealthy, because HEALTHCHECK only knows the env var.
     (spit eff-port port)
     (log "effective config ->" eff-cfg (str "(" descr ")"))
+    ;; Routes are decisions too. `:endpoints #{:query}` serves /ds/sparql because
+    ;; that is Fuseki's conventional name — printing the paths turns that from a
+    ;; 404 you have to go and discover into a line you already read at boot.
+    ;; Grouped by operation: "what did it wire up" needs the verb as well as the
+    ;; path. A bare "/x" is true and useless when /x serves query, update and
+    ;; gsp-rw at once.
+    (doseq [[ds ops] routes]
+      (log "routes:" ds "->"
+           (str/join " | " (for [[op paths] ops]
+                             (str (name op) " " (str/join " " paths))))))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (log "effective port   ->" eff-port (str "(" port ")"))
     (let [launch (case ui

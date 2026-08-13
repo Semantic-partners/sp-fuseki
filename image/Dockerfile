@@ -133,8 +133,14 @@ ENV BABASHKA_CLASSPATH=/opt/sp-fuseki
 # ISN'T in the image and Docker creates it root-owned — TDB2 then dies with
 # "IOException: No such file or directory", which looks like a config error and
 # isn't. See README → Persistence.
+#
+# /fuseki/run/configuration is pre-created for exactly the same reason, and it
+# bites harder because the path is one Fuseki tells you to use: mounting a single
+# file into it (`-v ./ds.ttl:/fuseki/run/configuration/ds.ttl`) makes Docker
+# create the MISSING PARENT root-owned, and Fuseki then dies "Not writable"
+# before it has served anything. Creating it here costs an empty directory.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin fuseki \
- && mkdir -p /fuseki/run /fuseki/databases \
+ && mkdir -p /fuseki/run/configuration /fuseki/databases \
  && chown -R fuseki:fuseki /fuseki
 
 # Both binaries must actually run on THIS arch — the one thing the fetch stage
