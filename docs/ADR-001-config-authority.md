@@ -152,55 +152,87 @@ validated-then-ignored class as #12, one level up.
 tag. Otherwise "which EDN does this renderer speak" is answered with a Docker tag, and
 those two will not stay in step.
 
-### 5. aero: revisit narrowly, for `#include`. Keep our strictness.
+### 5. `#include` as our own tag. Requirement accepted, aero rejected.
 
 The RFC records **"`#env`/`#file` reader tags, not aero — pulling aero into a bb script buys
-little else."** That was correct on the information available. **This is new information,
-not a reversal on the same facts:** the migration produced a concrete multi-dataset,
-per-file requirement that did not exist when the call was made.
+little else."** That was correct on the information available, and it stands. **What is new
+is the requirement, not a reason to reverse the vehicle:** the migration produced a concrete
+multi-dataset, per-file need that did not exist when the call was made.
 
-`#include` is the answer to the config-directory question in #19 — per-file separation
-*without* a third config source, without the root-owned-directory trap, and with the
-boundary visible in the document instead of inferred from a mount:
+`#include` answers the config-directory question in #19 — per-file separation *without* a
+third config source, without the root-owned-directory trap, and with the boundary visible in
+the document instead of inferred from a mount:
 
 ```clojure
 {:datasets [#include "chinook.edn"
             #include "offshore.edn"]}
 ```
 
-`#profile` is a second draw: dev/prod variants of one config.
+We implement it ourselves, next to `#env` and `#file`.
 
-**But adopting aero as-is would downgrade the property this project is built on.** Verified
-against aero's source:
+#### Why not aero, having seriously considered it
 
-```clojure
-(defn- get-env [s] (System/getenv (str s)))
-(defmethod reader 'env [opts tag value] (get-env value))
+Recorded because the option is attractive and will be proposed again.
+
+1. **It fails decision 0, four sections earlier.** Adopting aero adopts aero's *whole tag
+   vocabulary* — `#profile`, `#ref`, `#or`, `#merge`, `#long`, `#join`, `#hostname`. The
+   moment aero parses `fuseki.edn` they all work. None denotes anything in Jena's assembler
+   model, so each is a key that means something only to sp-fuseki. An earlier draft of this
+   ADR offered `#profile` as *a second draw in favour* — that was the strongest argument
+   against, written down as a benefit, and it is the clearest illustration of why decision 0
+   has to be applied rather than admired.
+2. **The README's claim goes false immediately.** *"Every extension point is documented below
+   and exercised by the smoke test."* Seven undocumented, un-smoke-tested tags would arrive in
+   one commit. Emergent undocumented extension points is precisely what the RFC criticises the
+   incumbents for.
+3. **The image has no dependency mechanism at all.** `BABASHKA_CLASSPATH=/opt/sp-fuseki`,
+   `ENTRYPOINT ["bb", "/opt/sp-fuseki/entrypoint.clj"]` — a bare script, no jars, no
+   resolution step, and `test/dockerfile_test.clj` fails the build if an artifact is fetched
+   without a hash. Aero means either vendoring third-party source into a boot path sold as
+   short and readable, or adding a Clojars fetch-and-verify stage.
+
+An earlier draft priced this wrong: its tripwire was *"if aero's transitive dependency
+surface turns out to be non-trivial"*. That was never the binding constraint. The constraint
+trips on **adoption**, not on transitive weight — a zero-dependency aero would still fail (1)
+and (2).
+
+**`#include` survives all three because it is a mechanism, not vocabulary** — the same class
+as `#env` and `#file`, which resolve to a value rather than naming a Jena concept. That is
+the line, and it is the test to apply to the next tag anyone proposes.
+
+**What we give up, and must therefore build:** aero had already solved cycle detection,
+relative-path resolution and a depth limit. Roughly thirty lines and a test each. Path-escape
+confinement is deliberately *not* built: whoever writes `fuseki.edn` already controls the
+whole config and could mount a `config.ttl` instead, so confining `#include` would be theatre
+that breaks legitimate absolute-path includes.
+
+**Tripwire:** the next proposal to adopt a config library wholesale. The question to ask is
+not "how heavy is it" but "how many tags does it bring that denote nothing in Jena's model".
+
+#### `#env` strictness — an improvement, now optional rather than forced
+
+Aero's `#env` is `(System/getenv s)` and returns **nil, silently**, where ours throws. That
+was cited as the mitigation aero would have required. With aero rejected, ours keeps throwing
+and there is no nil to catch — so this is no longer forced, and it should not be smuggled in
+as though it were.
+
+It is still worth doing on its own merits, and the trade should be made deliberately:
+
+```
+:auth :password is nil — #env "FUSEKI_ADMIN_PASSWORD" is not set     (validate-time)
+#env "FUSEKI_ADMIN_PASSWORD" is not set                              (read-time, today)
 ```
 
-aero's `#env` returns **nil, silently**, where ours throws. A missing
-`FUSEKI_ADMIN_PASSWORD` would stop being a loud boot failure and become nil threaded
-quietly into the config — the config-that-lies failure mode, arriving through the front
-door.
+The first says what the value was *for*; the second only says what is missing. But getting it
+means **deliberately weakening the reader** so nil reaches the validator — trading an
+immediate, simple failure for a later, better-informed one. Worth it, in our judgement,
+because a config error the user must map back to a purpose is a worse error. Not free, and
+not a consequence of anything else in this ADR.
 
-**Do not fix this by overriding aero's `reader` multimethod.** It is a global `defmethod`;
-redefining `'env` changes it process-wide for anything else using aero in the same JVM.
-Tolerable in a container, hostile in the standalone library decision 4 commits us to.
-
-**Fix it in validation instead**, which we already have and which produces a better message
-because it knows the config path:
-
-```
-:auth :password is nil — #env "FUSEKI_ADMIN_PASSWORD" is not set
-```
-
-against today's `#env "FUSEKI_ADMIN_PASSWORD" is not set`. The second says what is missing;
-the first says what it was for. Moving strictness from read-time to validate-time is an
-upgrade.
-
-**Tripwire:** if aero's transitive dependency surface turns out to be non-trivial, this
-trades a real property (a dependency-free image with checksummed downloads) for
-ergonomics, and the balance flips. Measure before adopting.
+Whichever way it goes: **do not implement it by overriding aero's `reader` multimethod** if
+aero is ever adopted. It is a global `defmethod`, so redefining `'env` changes it
+process-wide for anything else using aero in the same JVM — tolerable in a container, hostile
+in the standalone library decision 4 commits us to.
 
 ### 6. Every resolved decision gets a logged line naming its source — including routes.
 
@@ -228,8 +260,14 @@ chinook config cannot currently be expressed in EDN because of three things:
    operations because `spoqe load` targets the dataset URL directly — and so does the ES
    plugin's own config, via `fuseki:serviceQuery "sparql", "query", ""`.
 3. **No control over endpoint names, and the default is a live surprise.** `:query` renders
-   as `fuseki:name "sparql"`, so `/ds/query` is a 404. This one bites silently and is
-   independent of any extension work.
+   as `fuseki:name "sparql"` (`render.clj:56`), so `/ds/query` is a 404. This one bites
+   silently and is independent of any extension work.
+
+   **The fix is name control plus root support, NOT moving `:query` to `/ds/query`.** The
+   image is public as of 2026-08-13, so changing the default would move URLs under anyone
+   already running it. Callers that want `/chinook/query` ask for it explicitly; the default
+   stays where it is. This is the first decision where the image having users constrains a
+   correctness fix, and it will not be the last.
 
 ## What was verified, and what was not
 
