@@ -1,6 +1,9 @@
 # ADR-001: Config authority — gate what we own, assist what we don't
 
-- **Status:** Proposed
+- **Status:** Accepted. Most of it shipped — #22 (endpoint naming, root endpoints, `#include`,
+  the `configuration/` fix, route logging, duplicate-name refusal) and the `:text` work that
+  followed, including the module probe from 5b. **Decision 4 (the renderer as a standalone
+  artifact) is the outstanding piece** and is not built.
 - **Date:** 2026-08-13
 - **Deciders:** Lance; drafted by Claude from the first external migration onto sp-fuseki
 - **Related:** [RFC](RFC.md) → Config; [ASSESSMENT](ASSESSMENT.md) §1 and §9;
@@ -246,8 +249,9 @@ hostile in the standalone library decision 4 commits us to.
 
 ### 5b. Module vocabulary: we validate what we can see, and we say so.
 
-Raised by `:text`, which is not yet built — recorded now because it is a **limit on the
-central promise**, and limits are worth stating before someone discovers them.
+Raised by `:text`, and written before it was built — because it is a **limit on the central
+promise**, and limits are worth stating before someone discovers them. `:text` and the probe
+have since shipped; the decision below is what was implemented.
 
 Every EDN key so far denotes **core assembler vocabulary**: `fuseki:Service`,
 `tdb2:DatasetTDB2`, `ja:context`. Present by definition in any Fuseki, so validating a
@@ -296,8 +300,12 @@ on every boot. Reading the jar as a zip works, in-process, at negligible cost:
 
 ```clojure
 (with-open [z (java.util.zip.ZipFile. jar)]
-  (some? (.getEntry z "org/apache/jena/query/text/assembler/TextIndexLuceneAssembler.class")))
+  (some? (.getEntry z "org/apache/jena/query/text/assembler/TextDatasetAssembler.class")))
 ```
+
+`TextDatasetAssembler` specifically, not `TextIndexLuceneAssembler` — both are in the jar, but
+the rendered TTL declares `fuseki:dataset [ a text:TextDataset ]`, so that is the type whose
+absence produces the `NoSpecificTypeException` above.
 
 Written down because someone reaching for `Class.forName`, finding it impossible from bb, and
 quietly downgrading to documentation-only is precisely the outcome the tripwire below exists
