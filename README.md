@@ -32,8 +32,7 @@ README drifting away from what the container actually does.
 > **Status: v0.1, published to GHCR.** One image, both postures: **Fuseki's own
 > UI ships enabled** (asserted by the smoke test), and `FUSEKI_UI=off` gives you
 > the headless server. No separate `minimal`/`full` tags — it's a runtime switch,
-> not a build variant. A bespoke SPARQL editor UI (RFC tier 2) is a later,
-> separate decision — see [docs/RFC.md](docs/RFC.md).
+> not a build variant. A bespoke SPARQL editor UI is a later, separate decision.
 
 This is *Semantic Partners' distribution* of Apache Jena Fuseki. Apache Jena is
 Apache-2.0; this repackaging does not imply Apache endorsement. See [NOTICE](NOTICE).
@@ -485,8 +484,7 @@ answering, `#include` splicing a config directory, a Lucene index returning real
 hits on every mapped field, the module probe refusing a `:text` config when the
 jar lacks `jena-text`, and both a malformed EDN and a missing include failing
 loudly at boot. It does **not**
-test Jena's correctness; that's Apache's job (see
-[docs/ASSESSMENT.md](docs/ASSESSMENT.md) §6).
+test Jena's correctness; that's Apache's job.
 
 ## Publishing
 
@@ -557,8 +555,8 @@ Distribution & CI section.
 
 ## Docs
 
-- [docs/RFC.md](docs/RFC.md) — design, bets, milestones.
-- [docs/ASSESSMENT.md](docs/ASSESSMENT.md) — gaps/weakpoints review.
+- [docs/ADR-001-config-authority.md](docs/ADR-001-config-authority.md) — what the
+  EDN gates, what it passes through, and why it's a notation rather than a format.
 
 ## License
 
