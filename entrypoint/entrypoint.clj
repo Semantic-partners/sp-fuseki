@@ -115,6 +115,65 @@
       :else       [nil nil])))
 
 ;; ---------------------------------------------------------------------------
+;; Inputs we were handed and did not use
+;; ---------------------------------------------------------------------------
+;;
+;; The contract is that a resolved value is logged WITH ITS SOURCE. An input that
+;; resolves to nothing at all was getting no line, which is the same "config that
+;; lies" this image refuses in the file — just sourced from the environment.
+;;
+;; Two families, both real: FUSEKI_* we don't recognise (a typo, or a variable
+;; from another image), and the stain/jena-fuseki names a migrator will reach for
+;; out of habit. FUSEKI_DATASET_N is deliberately NOT implemented — a magic env
+;; var conjuring a dataset whose storage and endpoints are written down nowhere is
+;; the pattern this project exists to reject, and it would be a third way to
+;; declare a dataset beside config.ttl and fuseki.edn. Saying so is the fix.
+
+(def ^:private consumed
+  #{"FUSEKI_BASE" "FUSEKI_CONFIG" "FUSEKI_EDN" "FUSEKI_SHIRO" "FUSEKI_PORT"
+    "FUSEKI_DATASET" "FUSEKI_AUTH" "FUSEKI_UI" "FUSEKI_JAR" "FUSEKI_TDB2_ROOT"
+    "FUSEKI_ADMIN_USER" "FUSEKI_ADMIN_PASSWORD" "FUSEKI_ADMIN_PASSWORD_FILE"})
+
+(def ^:private inherited-from-elsewhere
+  "Names Fuseki's own scripts and the base image set, which are not ours to
+  explain. Reporting these would train people to ignore the whole line."
+  #{"FUSEKI_HOME" "JAVA_HOME" "JAVA_OPTS" "JVM_ARGS"})
+
+(def ^:private stain-vars
+  "stain/jena-fuseki's interface, with what to use instead. Named individually
+  because 'unrecognised' is not actionable and 'use :datasets' is."
+  {"ADMIN_PASSWORD"  "FUSEKI_ADMIN_PASSWORD (or :auth {:password #env \"...\"} in fuseki.edn)"
+   "FUSEKI_DATASET_1" "a :datasets entry in fuseki.edn"
+   "ENABLE_DATA_WRITE" ":endpoints #{:gsp-rw} on the dataset"
+   "ENABLE_UPDATE"     ":endpoints #{:update} on the dataset"
+   "ENABLE_UPLOAD"     ":endpoints #{:gsp-rw} on the dataset"
+   "QUERY_TIMEOUT"     "a mounted config.ttl — no EDN key for ARQ timeouts yet"})
+
+(defn report-unused-env!
+  "Log inputs we were given and did not act on. A warning, never fatal: the
+  environment is not ours alone, and refusing to boot over a stray variable would
+  be worse than the silence it replaces."
+  []
+  (let [names (set (keys (System/getenv)))]
+    (doseq [[v instead] (sort stain-vars)
+            :when (contains? names v)]
+      (log "WARNING:" v "is not read by this image — it is stain/jena-fuseki's."
+           "Use" (str instead ".")))
+    ;; FUSEKI_DATASET_2 and up, which the map above cannot enumerate.
+    (doseq [v (sort (filter #(re-matches #"FUSEKI_DATASET_\d+" %) names))
+            :when (not (contains? stain-vars v))]
+      (log "WARNING:" v "is not read by this image — it is stain/jena-fuseki's."
+           "Use a :datasets entry in fuseki.edn."))
+    (doseq [v (sort names)
+            :when (and (str/starts-with? v "FUSEKI_")
+                       (not (contains? consumed v))
+                       (not (contains? inherited-from-elsewhere v))
+                       (not (contains? stain-vars v))
+                       (not (re-matches #"FUSEKI_DATASET_\d+" v)))]
+      (log "WARNING:" v "looks like ours and is not read by this image."
+           "Check the spelling against the README's Environment table."))))
+
+;; ---------------------------------------------------------------------------
 ;; Module-backed keys — the one place validation can't promise what it usually does
 ;; ---------------------------------------------------------------------------
 ;;
@@ -275,6 +334,9 @@
 
 (defn -main []
   (fs/create-dirs base)
+  ;; Before anything is resolved, so a migrator sees "that variable did nothing"
+  ;; above the lines showing what happened instead.
+  (report-unused-env!)
   (let [eff-cfg   (str base "/config.effective.ttl")
         eff-shiro (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
         eff-port  (str base "/port")        ; read by the image's HEALTHCHECK
