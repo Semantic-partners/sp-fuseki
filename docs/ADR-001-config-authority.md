@@ -111,21 +111,26 @@ has been broken and #12's bug class is back.
 
 ### 3. `:context` is the structured escape hatch — better than raw triples.
 
-Semantic Partners' Elasticsearch plugin extends Fuseki through exactly one mechanism:
+A real Elasticsearch sync plugin we work with extends Fuseki through exactly one
+mechanism — a single ARQ context key:
 
 ```turtle
-ja:context [ ja:cxtName "http://schema.synaptica.com/oasis#syncToEsIndex" ; ja:cxtValue "graphite" ]
+ja:context [ ja:cxtName "http://example.org/plugin#syncToEsIndex" ; ja:cxtValue "kb" ]
 ```
 
 `ja:context` is **not plugin-specific** — it is Jena's generic ARQ-context extension point.
 Only the *keys* are unknown to us. So the shape is ours to gate and the keys are not:
 
 ```clojure
-:prefixes {:oasis "http://schema.synaptica.com/oasis#"}
+:prefixes {:plugin "http://example.org/plugin#"}
 …
-{:name "graphite" :storage :tdb2
- :context {:oasis/syncToEsIndex "graphite"}}
+{:name "kb" :storage :tdb2
+ :context {:plugin/syncToEsIndex "kb"}}
 ```
+
+The IRI here is deliberately `example.org`: the whole point of this decision is that we do
+not know what the key means, so the real vendor's namespace adds nothing and is not ours to
+publish.
 
 We validate that it is a map of IRI → value. We know nothing about what the IRI means, and
 we should not pretend to. This covers every ARQ-context plugin rather than one, and it is
