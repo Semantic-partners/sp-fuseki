@@ -6,10 +6,9 @@
   artifact) is the outstanding piece** and is not built.
 - **Date:** 2026-08-13
 - **Deciders:** Lance; drafted by Claude from the first external migration onto sp-fuseki
-- **Related:** [RFC](RFC.md) → Config; [ASSESSMENT](ASSESSMENT.md) §1 and §9;
-  issues #12, #13, #14, #16, #18, #19
-- **Evidence:** migrating SPOQE's `chinook` test rig (4 datasets, Lucene text index)
-  off `stain/jena-fuseki:5.1.0`, and booting Semantic Partners' Elasticsearch-plugin
+- **Related:** issues #12, #13, #14, #16, #18, #19
+- **Evidence:** migrating a real four-dataset rig with a Lucene text index onto this
+  image, and booting an existing Elasticsearch-plugin
   config unchanged on Jena 6.2.
 
 ## Context
