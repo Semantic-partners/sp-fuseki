@@ -117,7 +117,10 @@
      ;; The mechanism stays: add a version here to publish it alongside the
      ;; Dockerfile's pin, and the gate will tell you if it's patchable.
      :env (m :EXTRA_JENA ""
-             :SAME_REPO (str "${{ " same-repo-or-push " }}"))
+             :SAME_REPO (str "${{ " same-repo-or-push " }}")
+             ;; Enforced rather than remembered: the settings that keep forks off
+             ;; the Mac are checkboxes, and this is code.
+             :IS_PUBLIC "${{ github.event.repository.private == false }}")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
                  :arches "${{ steps.p.outputs.arches }}"
@@ -134,8 +137,20 @@
                           "# A self-hosted runner executes whatever the workflow says, on a real\n"
                           "# machine with persistent state and LAN access. Fork PRs get hosted\n"
                           "# amd64 only — still tested, just not on our hardware.\n"
-                          "if [ \"$SAME_REPO\" = \"true\" ]; then\n"
+                          "#\n"
+                          "# And if this repo is PUBLIC, no event is safe enough: approval settings\n"
+                          "# are a checkbox someone can change, and GitHub's own guidance is not to\n"
+                          "# use self-hosted runners with public repos at all. Fail rather than\n"
+                          "# quietly dropping arm64 — a silently single-arch pipeline is worse, and\n"
+                          "# the choice (fence the Mac, or move arm64 to hosted arm runners) is a\n"
+                          "# decision someone has to take. See issue #9.\n"
+                          "if [ \"$IS_PUBLIC\" = \"false\" ] && [ \"$SAME_REPO\" = \"true\" ]; then\n"
                           "  ARCHES='[\"amd64\", \"arm64\"]'\n"
+                          "elif [ \"$IS_PUBLIC\" = \"true\" ]; then\n"
+                          "  echo \"::error::This repo is public and the arm64 leg targets a self-hosted\" \\\n"
+                          "       \"runner. Move arm64 to hosted arm runners, or restrict the runner to\" \\\n"
+                          "       \"private repos and remove this guard deliberately. See issue #9.\" >&2\n"
+                          "  exit 1\n"
                           "else\n"
                           "  ARCHES='[\"amd64\"]'\n"
                           "  echo \"fork PR: omitting the self-hosted arm64 leg\"\n"
