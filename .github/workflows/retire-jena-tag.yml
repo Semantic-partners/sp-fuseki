@@ -1,0 +1,138 @@
+name: retire-jena-tag
+
+# Retire a published Jena leg: retag it `<jena>-unsupported`, then drop the plain
+# `<jena>` and `<jena>-<run>` tags. Issue #23.
+#
+# Why retag before dropping: anyone pinned to `6.1.0` gets a name that still
+# resolves and tells them the truth, rather than a 404 and a guess. Deleting
+# outright was the first suggestion and this is better.
+#
+# Manual only, and dry-run by default. This deletes published artifacts, which is
+# not something a schedule or a push should ever decide.
+
+on:
+  workflow_dispatch:
+    inputs:
+      jena:
+        description: "Jena version to retire, e.g. 6.1.0"
+        required: true
+        type: string
+      execute:
+        description: "Actually delete. Leave false to see what would happen."
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to retire the current default
+        env:
+          JENA: ${{ inputs.jena }}
+        run: |
+          set -euo pipefail
+          DEF="$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)"
+          echo "requested: $JENA / current default: $DEF"
+          if [ "$JENA" = "$DEF" ]; then
+            echo "::error::$JENA is the version image/Dockerfile currently pins, so it is what \`latest\` points at. Bump the pin first." >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag as unsupported
+        id: retag
+        env:
+          JENA: ${{ inputs.jena }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/sp-fuseki"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${JENA}" --format '{{json .Manifest}}' | jq -r .digest)"
+          [ -n "$DIGEST" ] && [ "$DIGEST" != "null" ] || { echo "::error::no digest for ${IMAGE}:${JENA}" >&2; exit 1; }
+          echo "retagging ${DIGEST} as ${JENA}-unsupported"
+          # Additive: the bytes are unchanged, so the existing signature over this
+          # digest still verifies.
+          docker buildx imagetools create -t "${IMAGE}:${JENA}-unsupported" "${IMAGE}@${DIGEST}"
+          {
+            echo "image=$IMAGE"
+            echo "digest=$DIGEST"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Find the versions that would be dropped
+        id: find
+        env:
+          JENA: ${{ inputs.jena }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Plain `<jena>` and any `<jena>-<run>`; never anything tagged latest, and
+          # never the -unsupported tag we just created.
+          gh api --paginate "/orgs/${OWNER}/packages/container/sp-fuseki/versions" \
+            --jq '.[] | {id, tags: .metadata.container.tags}' > /tmp/versions.jsonl
+          jq -c --arg j "$JENA" '
+            select(any(.tags[]?; . == $j or startswith($j + "-")))
+            | select(all(.tags[]?; . != "latest"))
+            | select(all(.tags[]?; . != ($j + "-unsupported")))
+          ' /tmp/versions.jsonl > /tmp/targets.jsonl || true
+          COUNT="$(wc -l < /tmp/targets.jsonl | tr -d ' ')"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Versions matching \`${JENA}\`"
+            echo
+            echo '```'
+            cat /tmp/targets.jsonl
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/targets.jsonl
+
+      - name: Delete them
+        if: inputs.execute
+        env:
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          while read -r line; do
+            [ -n "$line" ] || continue
+            id="$(echo "$line" | jq -r .id)"
+            tags="$(echo "$line" | jq -rc .tags)"
+            echo "deleting version $id $tags"
+            # A repo-scoped GITHUB_TOKEN cannot always delete org package versions.
+            # If that is the case, say so plainly rather than reporting success.
+            gh api -X DELETE "/orgs/${OWNER}/packages/container/sp-fuseki/versions/${id}" \
+              || { echo "::error::delete failed for $id — a PAT with delete:packages may be required" >&2; exit 1; }
+          done < /tmp/targets.jsonl
+
+      - name: What happened
+        env:
+          JENA: ${{ inputs.jena }}
+          COUNT: ${{ steps.find.outputs.count }}
+          EXECUTED: ${{ inputs.execute }}
+        run: |
+          set -euo pipefail
+          {
+            echo "- retagged: \`${JENA}-unsupported\` -> ${{ steps.retag.outputs.digest }}"
+            echo "- matching versions: ${COUNT}"
+            if [ "$EXECUTED" = "true" ]; then
+              echo "- deleted: yes"
+            else
+              echo "- deleted: **no** (dry run — re-run with \`execute: true\`)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

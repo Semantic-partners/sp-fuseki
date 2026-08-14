@@ -28,6 +28,7 @@ jobs:
     env:
       EXTRA_JENA: ''
       SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      IS_PUBLIC: ${{ github.event.repository.private == false }}
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
@@ -47,8 +48,20 @@ jobs:
         # A self-hosted runner executes whatever the workflow says, on a real
         # machine with persistent state and LAN access. Fork PRs get hosted
         # amd64 only — still tested, just not on our hardware.
-        if [ "$SAME_REPO" = "true" ]; then
+        #
+        # And if this repo is PUBLIC, no event is safe enough: approval settings
+        # are a checkbox someone can change, and GitHub's own guidance is not to
+        # use self-hosted runners with public repos at all. Fail rather than
+        # quietly dropping arm64 — a silently single-arch pipeline is worse, and
+        # the choice (fence the Mac, or move arm64 to hosted arm runners) is a
+        # decision someone has to take. See issue #9.
+        if [ "$IS_PUBLIC" = "false" ] && [ "$SAME_REPO" = "true" ]; then
           ARCHES='["amd64", "arm64"]'
+        elif [ "$IS_PUBLIC" = "true" ]; then
+          echo "::error::This repo is public and the arm64 leg targets a self-hosted" \
+               "runner. Move arm64 to hosted arm runners, or restrict the runner to" \
+               "private repos and remove this guard deliberately. See issue #9." >&2
+          exit 1
         else
           ARCHES='["amd64"]'
           echo "fork PR: omitting the self-hosted arm64 leg"
