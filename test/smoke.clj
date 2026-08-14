@@ -116,14 +116,42 @@
   (zero? (:exit (apply docker "exec" cid cmd))))
 
 (defn- boot-output
-  "Run to completion and capture output — for the configs that must FATAL."
-  [{:keys [env mounts]}]
-  (let [flags (concat ["run" "--rm"]
+  "Boot once and return the log output, whether the entrypoint dies or comes up.
+
+  Detached with a bounded wait, NOT `docker run --rm` in the foreground. The
+  foreground version could only handle a config that FATALs — its docstring said
+  so, and nothing enforced it. s30 asserts a boot that is deliberately NOT fatal,
+  so Fuseki came up and the run never returned: 40+ minutes on both CI arch legs.
+  A documented constraint with no enforcement is the defect class this suite exists
+  to catch, so the constraint now lives in the function.
+
+  A FATAL config exits immediately and returns fast; a healthy one returns after
+  settle-ms. The warnings callers assert are printed before Fuseki starts."
+  [{:keys [env mounts]} & [{:keys [settle-ms] :or {settle-ms 6000}}]]
+  (let [flags (concat ["run" "-d"]
                       (mapcat (fn [[k v]] ["-e" (str k "=" v)]) env)
                       (mapcat (fn [m] ["-v" m]) mounts)
                       [image])
-        {:keys [out err]} (apply docker flags)]
-    (str out err)))
+        {:keys [out err exit]} (apply docker flags)
+        cid (str/trim (str out))]
+    ;; Guard before the try: a failed `docker run` leaves an error fragment here,
+    ;; and `finally` would then rm! it.
+    (when (or (not (zero? exit)) (str/blank? cid))
+      (throw (ex-info (str "docker run -d failed: " err) {})))
+    (try
+      (loop [waited 0]
+        (when (and (= "true" (str/trim (str (:out (docker "inspect" "-f" "{{.State.Running}}" cid)))))
+                   (< waited settle-ms))
+          (Thread/sleep 300)
+          (recur (+ waited 300))))
+      (let [l (logs cid)]
+        ;; Running=false is also the pre-start state. If this ever fires early the
+        ;; caller gets empty logs and its assertions fail pointing at the
+        ;; entrypoint; failing here points at the harness instead.
+        (when (str/blank? l)
+          (throw (ex-info "boot-output captured no log output" {:cid cid})))
+        l)
+      (finally (rm! cid)))))
 
 (defn- fixture [name content]
   ;; Parents created, so a fixture can be nested — #include's whole point is a
@@ -506,6 +534,34 @@
         (is (str/includes? l "routes:") "routes are logged for the generated default")
         (is (str/includes? l "query /ds/sparql")
             "the operation is named alongside the path — a bare path half-answers")))))
+
+(deftest s30-inputs-we-ignore-are-reported
+  ;; The contract is that a resolved value is logged with its source. An input
+  ;; that resolves to NOTHING was getting no line — the same "config that lies",
+  ;; sourced from the environment rather than the file.
+  (let [out (boot-output {:env {"ADMIN_PASSWORD"  "admin"
+                                "FUSEKI_DATASET_2" "batches"
+                                "ENABLE_UPDATE"   "true"
+                                "FUSEKI_PROT"     "1"
+                                "FUSEKI_HOME"     "/opt/fuseki"}})]
+    (testing "stain/jena-fuseki's names are reported individually, with what to use
+    instead — 'unrecognised' is not actionable and ':datasets' is"
+      (is (str/includes? out "ADMIN_PASSWORD is not read by this image"))
+      (is (str/includes? out "FUSEKI_ADMIN_PASSWORD") "names the replacement")
+      (is (str/includes? out "ENABLE_UPDATE is not read by this image"))
+      (is (str/includes? out ":endpoints #{:update}") "names the replacement"))
+    (testing "FUSEKI_DATASET_N is matched by pattern, not enumerated — and is
+    deliberately NOT implemented, since a dataset conjured by an env var is
+    written down nowhere"
+      (is (str/includes? out "FUSEKI_DATASET_2 is not read"))
+      (is (str/includes? out "a :datasets entry in fuseki.edn")))
+    (testing "a typo in our own namespace is caught"
+      (is (str/includes? out "FUSEKI_PROT looks like ours")))
+    (testing "but names the base image and Fuseki's own scripts set are NOT
+    reported — warning about those trains people to ignore the whole line"
+      (is (not (str/includes? out "FUSEKI_HOME looks like ours"))))
+    (testing "and none of it is fatal — the environment is not ours alone"
+      (is (not (str/includes? out "FATAL"))))))
 
 (deftest s29-a-text-index-actually-indexes
   ;; The whole point of :text is that the rendered TTL works, not that it parses.
