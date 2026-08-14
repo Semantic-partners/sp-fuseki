@@ -417,6 +417,18 @@ and every one of these findings is currently unreachable in normal operation. If
 your risk model says otherwise, that's a legitimate reason to build your own from
 [image/Dockerfile](image/Dockerfile) — it's a short file, which is the point.
 
+**Supply chain.** Separate question from the CVE table, and the honest summary is
+that the three fetched artifacts are not equally protected. All three are
+checksum-verified; Fuseki and the Temurin JRE additionally have their PGP
+signature checked against a **pinned key fingerprint**; babashka publishes no
+signature at all. Full detail under [Publishing](#publishing).
+
+One asymmetry worth stating here rather than leaving in the Dockerfile: the JRE's
+public key comes from a keyserver, so key and artifact travel different channels.
+Apache serves `KEYS` from the same host as the tarball, so anyone who owns that
+host owns both — and **the pinned fingerprint is the only thing standing there**.
+It is doing more work in the Fuseki case than in the JRE one.
+
 ## Build & test locally
 
 ```bash
