@@ -64,4 +64,12 @@ else
   exit 1
 fi
 
-exec env IMAGE="$IMAGE" PORT="${PORT:-13030}" "$BB" test/smoke.clj
+# PORT is forwarded ONLY if the caller set one. It used to default to 13030 here,
+# which meant smoke.clj's own default was unreachable through this wrapper — so
+# moving the default into the script fixed nothing until this line changed too.
+# One default, in one place, and it is the dynamic one.
+if [ -n "${PORT:-}" ]; then
+  exec env IMAGE="$IMAGE" PORT="$PORT" "$BB" test/smoke.clj
+else
+  exec env IMAGE="$IMAGE" "$BB" test/smoke.clj
+fi
