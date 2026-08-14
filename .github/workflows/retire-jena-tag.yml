@@ -1,11 +1,20 @@
 name: retire-jena-tag
 
-# Retire a published Jena leg: retag it `<jena>-unsupported`, then drop the plain
-# `<jena>` and `<jena>-<run>` tags. Issue #23.
+# Retire a published Jena leg: delete every version tagged `<jena>` or
+# `<jena>-<run>`. Issue #23.
 #
-# Why retag before dropping: anyone pinned to `6.1.0` gets a name that still
-# resolves and tells them the truth, rather than a 404 and a guess. Deleting
-# outright was the first suggestion and this is better.
+# It used to retag as `<jena>-unsupported` first, so anyone pinned got a name that
+# still resolved and told them the truth. That cannot work, and the first live run
+# proved it: `imagetools create` is ADDITIVE, so the new tag landed on the SAME
+# manifest as the plain one. GHCR deletes at version granularity — one digest, many
+# tags, no per-tag delete — so `6.1.0` and `6.1.0-unsupported` were one object, and
+# the guard protecting the new tag protected the old one too. The run reported
+# success having deleted the numbered tags and silently skipped the one that
+# mattered.
+#
+# Preserving the bytes under a different name would need a genuinely different
+# manifest (a re-push with an added annotation). Not worth it for a courtesy to
+# nobody: an image we will not patch should stop resolving.
 #
 # Manual only, and dry-run by default. This deletes published artifacts, which is
 # not something a schedule or a push should ever decide.
@@ -48,32 +57,6 @@ jobs:
             exit 1
           fi
 
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Retag as unsupported
-        id: retag
-        env:
-          JENA: ${{ inputs.jena }}
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          IMAGE="${REGISTRY}/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/sp-fuseki"
-          DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${JENA}" --format '{{json .Manifest}}' | jq -r .digest)"
-          [ -n "$DIGEST" ] && [ "$DIGEST" != "null" ] || { echo "::error::no digest for ${IMAGE}:${JENA}" >&2; exit 1; }
-          echo "retagging ${DIGEST} as ${JENA}-unsupported"
-          # Additive: the bytes are unchanged, so the existing signature over this
-          # digest still verifies.
-          docker buildx imagetools create -t "${IMAGE}:${JENA}-unsupported" "${IMAGE}@${DIGEST}"
-          {
-            echo "image=$IMAGE"
-            echo "digest=$DIGEST"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Find the versions that would be dropped
         id: find
         env:
@@ -82,14 +65,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Plain `<jena>` and any `<jena>-<run>`; never anything tagged latest, and
-          # never the -unsupported tag we just created.
+          # Plain `<jena>` and any `<jena>-<run>`; never anything tagged latest.
+          # There is no -unsupported exclusion any more: it would have matched the
+          # same version as the plain tag and protected what we came to delete.
           gh api --paginate "/orgs/${OWNER}/packages/container/sp-fuseki/versions" \
             --jq '.[] | {id, tags: .metadata.container.tags}' > /tmp/versions.jsonl
           jq -c --arg j "$JENA" '
             select(any(.tags[]?; . == $j or startswith($j + "-")))
             | select(all(.tags[]?; . != "latest"))
-            | select(all(.tags[]?; . != ($j + "-unsupported")))
           ' /tmp/versions.jsonl > /tmp/targets.jsonl || true
           COUNT="$(wc -l < /tmp/targets.jsonl | tr -d ' ')"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
@@ -128,7 +111,6 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "- retagged: \`${JENA}-unsupported\` -> ${{ steps.retag.outputs.digest }}"
             echo "- matching versions: ${COUNT}"
             if [ "$EXECUTED" = "true" ]; then
               echo "- deleted: yes"
