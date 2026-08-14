@@ -29,7 +29,26 @@
             [clojure.test :refer [deftest testing is run-tests]]))
 
 (def image (or (System/getenv "IMAGE") "sp-fuseki:dev"))
-(def host-port (or (System/getenv "PORT") "13030"))
+(defn- free-port
+  "An unused port from the OS, by binding :0 and asking what it gave us.
+
+  The default used to be a hardcoded 13030, which is fine until two smoke runs
+  share a machine — and the arm64 CI leg runs on the same Mac people develop on,
+  so that is not hypothetical. A local run and the CI run overlapped by twelve
+  seconds and took main red with 25 identical errors:
+
+    Bind for :::13030 failed: port is already allocated
+
+  There is a small race between closing this socket and docker binding it. That
+  is worth it: the alternative is a documented convention that whoever is at the
+  keyboard must not run the suite while CI does, which is exactly the kind of
+  unenforced constraint this suite exists to catch."
+  []
+  (with-open [s (java.net.ServerSocket. 0)]
+    (str (.getLocalPort s))))
+
+;; PORT stays an override, so a failing run can be reproduced on the port it used.
+(def host-port (or (System/getenv "PORT") (free-port)))
 (def here (str (fs/parent (fs/absolutize *file*))))
 (def repo (str (fs/parent here)))
 (def base (str "http://localhost:" host-port))
