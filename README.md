@@ -497,9 +497,44 @@ supported Jena at a time, and it is the current one.
 Every artifact the build fetches — the Temurin JRE, the Fuseki tarball, babashka —
 is verified against the hash its own publisher ships (`sha256`/`sha512`), because a
 connection reset mid-transfer produces a truncated archive that can still unpack and
-boot. That's integrity, not provenance: the checksum travels the same channel as the
-artifact. [test/dockerfile_test.clj](test/dockerfile_test.clj) fails if a future
-artifact is added without one.
+boot. [test/dockerfile_test.clj](test/dockerfile_test.clj) fails if a future artifact
+is added without one.
+
+**A checksum is integrity, not provenance** — it travels the same channel as the
+artifact, so anyone who can alter one can alter the other. Two of the three
+artifacts now carry the stronger claim: their PGP signature is verified **against a
+pinned key fingerprint**.
+
+| Artifact | Integrity | Provenance | Signer |
+|---|---|---|---|
+| Fuseki | `sha512` | `.asc`, pinned | `D99038A1…` — Andy Seaborne, Apache code-signing key |
+| Temurin JRE | `sha256` | `.sig`, pinned | `3B04D753…` — Adoptium, key from a keyserver |
+| babashka | `sha256` | **none available** | publishes neither `.sig` nor `.asc` |
+
+**The pin is the whole point.** `gpg --verify` exits `0` for a good signature from
+*any* key in its ring, so importing a key file and trusting the exit status would
+pass for an artifact signed by anybody who could also serve you that key file. The
+build reads gpg's machine-readable status and requires `VALIDSIG <pinned fingerprint>`:
+
+```
+provenance: JRE signature verified against pinned key 3B04D753C9050D9A5D343F39843C48A565F8F04B
+provenance: signature verified against pinned key D99038A1731B8B31B71549EF04C95136D236A58F
+```
+
+**A release cut by a different signer will fail the build**, deliberately —
+trusting a new key should be a person's decision, not a silent consequence of a
+version bump. The failure prints the signature's actual `VALIDSIG` line, so the
+fingerprint to consider is already in front of you. Update `JENA_KEY_FPR` /
+`TEMURIN_KEY_FPR` in the same commit as the version.
+
+The JRE's public key is fetched from a **keyserver** rather than from the release
+host, which is strictly better than the Fuseki case: key and artifact then travel
+different channels, so compromising the download host isn't enough. Apache
+publishes `KEYS` on its own infrastructure, so there the pin is doing all the work.
+
+babashka's gap is real and checked rather than assumed — `.sig` and `.asc` both
+404 against its release assets, and `dockerfile_test.clj` asserts it stays
+checksum-only rather than quietly appearing verified.
 
 There is no cron — builds run on bumps. Renovate watches Jena via
 Maven Central, and [upstream-check.yml](.github/workflows/upstream-check.yml) runs

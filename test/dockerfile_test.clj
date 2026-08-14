@@ -73,6 +73,40 @@
       (is (re-find #"sha512sum -c" block)
           "test -f passes for a truncated tarball that still yields the path"))))
 
+(deftest signatures-are-verified-against-pinned-keys
+  ;; A checksum is integrity: the bytes arrived intact. It cannot be provenance,
+  ;; because it travels the same channel as the artifact. The signature is the
+  ;; provenance claim — and it is worth nothing unless the SIGNER is pinned.
+  (doseq [[label sig-file arg fatal]
+          [["Fuseki" "fuseki.asc" "JENA_KEY_FPR"    #"FATAL: Fuseki \.asc is not a valid signature"]
+           ["JRE"    "jre.sig"    "TEMURIN_KEY_FPR" #"FATAL: JRE \.sig is not a valid signature"]]]
+    (testing label
+      (let [block (first (filter #(str/includes? % sig-file) (run-blocks dockerfile)))]
+        (is (some? block) (str label " must fetch its signature"))
+        (testing "a full 40-hex fingerprint is pinned as a build ARG"
+          (is (some? (re-find (re-pattern (str "ARG " arg "=[0-9A-F]{40}")) dockerfile))
+              (str arg " must be a full fingerprint, not a short key id — short ids collide")))
+        (testing "and the verification asserts THAT fingerprint"
+          (is (str/includes? block (format "VALIDSIG ${%s} " arg))
+              "grep VALIDSIG <pinned fpr>, trailing space so no prefix can match"))
+        (testing "gpg's exit code is NOT the check"
+          ;; `gpg --verify` exits 0 for a good signature from ANY key in the ring,
+          ;; so importing a key file and trusting $? would pass for an artifact
+          ;; signed by anybody who could also serve you the key file.
+          (is (str/includes? block "--status-fd 1")
+              "must read the machine-readable status, not $?"))
+        (testing "and it fails loudly, naming what it wanted"
+          (is (re-find fatal block))))))
+  (testing "the JRE's key comes from a keyserver, so key and artifact do not share a host"
+    (let [block (first (filter #(str/includes? % "jre.sig") (run-blocks dockerfile)))]
+      (is (re-find #"\$CURL[^;]*keyserver" block))))
+  (testing "babashka is checksum-only — verified as a real gap, not an oversight:
+  it publishes neither .sig nor .asc alongside its release assets"
+    (let [block (first (filter #(str/includes? % "bb.tgz") (run-blocks dockerfile)))]
+      (is (some? block))
+      (is (re-find #"sha256sum -c" block))
+      (is (not (str/includes? block "--verify")) "no signature to verify"))))
+
 (deftest the-final-stage-proves-the-binaries-run-on-the-target-arch
   ;; The fetch stage runs on the BUILD platform, so it can unpack target-arch
   ;; binaries but never execute them. This is the only place that can.
