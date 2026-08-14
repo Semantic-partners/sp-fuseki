@@ -102,6 +102,20 @@
   (testing "publish never runs for a fork at all"
     (is (str/includes? (:if (job :publish)) "head.repo.full_name == github.repository"))))
 
+(deftest a-public-repo-refuses-to-use-the-self-hosted-runner
+  ;; Issue #9's two org settings are checkboxes; this is the part that can't be
+  ;; un-ticked by accident. Failing beats silently dropping arm64 — the merge job
+  ;; would then reject the single-arch manifest with a more confusing error.
+  (let [script (:run (second (:steps (job :plan))))]
+    (is (str/includes? (get-in (job :plan) [:env :IS_PUBLIC]) "repository.private == false")
+        "plan must know whether the repo is public")
+    (is (str/includes? script "IS_PUBLIC")
+        "and act on it")
+    (is (str/includes? script "::error::")
+        "with a GitHub-annotated error, not a bare exit")
+    (is (str/includes? script "issue #9")
+        "naming where the decision lives")))
+
 (deftest cosign-is-installed-by-us-with-verification
   ;; sigstore/cosign-installer single-shots a GitHub release download, which
   ;; failed this pipeline twice (exit 56, exit 22).
