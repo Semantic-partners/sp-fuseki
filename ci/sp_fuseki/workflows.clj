@@ -58,12 +58,20 @@
   [strs]
   (str "[" (str/join ", " (map pr-str strs)) "]"))
 
+(def hosted-arm
+  "GitHub's free arm64 runner — public repositories ONLY. The label fails outright
+  in a private repo, which is why the choice below is made at runtime by `plan`
+  rather than pinned here: this repo is private today and public later, and the
+  same workflow has to work across the flip without a red window."
+  "ubuntu-24.04-arm")
+
 (defn runner-for
-  "amd64 on hosted, arm64 on the Mac. Emitted as a ternary because `runs-on`
-  can't be a matrix lookup."
+  "amd64 on hosted; arm64 wherever `plan` says. Emitted as a ternary because
+  `runs-on` can't be a matrix lookup, and plan's value is JSON so it can be either
+  a bare label (public) or the self-hosted label set (private)."
   [arch-expr]
-  (format "${{ %s == 'arm64' && fromJSON('%s') || '%s' }}"
-          arch-expr (json-array mac-arm64) hosted))
+  (format "${{ %s == 'arm64' && fromJSON(needs.plan.outputs.arm_runner) || '%s' }}"
+          arch-expr hosted))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared expressions
@@ -124,6 +132,7 @@
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
                  :arches "${{ steps.p.outputs.arches }}"
+                 :arm_runner "${{ steps.p.outputs.arm_runner }}"
                  :image "${{ steps.p.outputs.image }}")
      :steps [(m :uses "actions/checkout@v4")
              (m :id "p"
@@ -137,28 +146,29 @@
                           "# A self-hosted runner executes whatever the workflow says, on a real\n"
                           "# machine with persistent state and LAN access. Fork PRs get hosted\n"
                           "# amd64 only — still tested, just not on our hardware.\n"
-                          "#\n"
-                          "# And if this repo is PUBLIC, no event is safe enough: approval settings\n"
-                          "# are a checkbox someone can change, and GitHub's own guidance is not to\n"
-                          "# use self-hosted runners with public repos at all. Fail rather than\n"
-                          "# quietly dropping arm64 — a silently single-arch pipeline is worse, and\n"
-                          "# the choice (fence the Mac, or move arm64 to hosted arm runners) is a\n"
-                          "# decision someone has to take. See issue #9.\n"
-                          "if [ \"$IS_PUBLIC\" = \"false\" ] && [ \"$SAME_REPO\" = \"true\" ]; then\n"
+                          "# PUBLIC: arm64 goes to GitHub's free hosted arm runner, so the\n"
+                          "# self-hosted Mac is never scheduled and the risk disappears rather\n"
+                          "# than being fenced. Fork PRs are then safe on arm64 too — a hosted\n"
+                          "# VM is disposable.\n"
+                          "# PRIVATE: that label does not exist, so arm64 stays on the Mac and\n"
+                          "# fork PRs get amd64 only.\n"
+                          "if [ \"$IS_PUBLIC\" = \"true\" ]; then\n"
+                          "  ARM_RUNNER='\"ubuntu-24.04-arm\"'\n"
                           "  ARCHES='[\"amd64\", \"arm64\"]'\n"
-                          "elif [ \"$IS_PUBLIC\" = \"true\" ]; then\n"
-                          "  echo \"::error::This repo is public and the arm64 leg targets a self-hosted\" \\\n"
-                          "       \"runner. Move arm64 to hosted arm runners, or restrict the runner to\" \\\n"
-                          "       \"private repos and remove this guard deliberately. See issue #9.\" >&2\n"
-                          "  exit 1\n"
+                          "elif [ \"$SAME_REPO\" = \"true\" ]; then\n"
+                          "  ARM_RUNNER='[\"self-hosted\", \"macOS\", \"ARM64\"]'\n"
+                          "  ARCHES='[\"amd64\", \"arm64\"]'\n"
                           "else\n"
+                          "  ARM_RUNNER='[\"self-hosted\", \"macOS\", \"ARM64\"]'\n"
                           "  ARCHES='[\"amd64\"]'\n"
-                          "  echo \"fork PR: omitting the self-hosted arm64 leg\"\n"
+                          "  echo \"fork PR on a private repo: omitting the self-hosted arm64 leg\"\n"
                           "fi\n"
+                          "echo \"arm64 runner: $ARM_RUNNER\"\n"
                           "{\n"
                           "  echo \"default=$DEF\"\n"
                           "  echo \"matrix=$MATRIX\"\n"
                           "  echo \"arches=$ARCHES\"\n"
+                          "  echo \"arm_runner=$ARM_RUNNER\"\n"
                           "  # GHCR requires a lowercase image name.\n"
                           "  echo \"image=${REGISTRY}/${OWNER}/sp-fuseki\"\n"
                           "} >> \"$GITHUB_OUTPUT\"\n"
