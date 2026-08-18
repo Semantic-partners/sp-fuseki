@@ -115,6 +115,38 @@ For poking around, `--entrypoint` is still fine and changes nothing permanent:
 docker run --rm -it --entrypoint sh ghcr.io/semantic-partners/sp-fuseki
 ```
 
+### The healthcheck — don't redeclare it either
+
+The image ships a `HEALTHCHECK`, and Compose inherits it. **Write no `healthcheck:`
+stanza** — see [examples/docker-compose.yml](examples/docker-compose.yml).
+
+The reason matters more than the convention. Ours reads the **resolved** port:
+
+```sh
+p=$(cat "${FUSEKI_BASE:-/fuseki/run}/port" 2>/dev/null || echo "${FUSEKI_PORT:-3030}")
+curl -fsS "http://localhost:${p}/$/ping" || exit 1
+```
+
+so it still works when the port comes from `fuseki.edn`'s `:server {:port n}` or
+`FUSEKI_PORT`. A hardcoded `http://localhost:3030/...` in your Compose file serves
+fine and reports **unhealthy** the moment anyone changes the port.
+
+If you only need different timings, set them and omit `test` — Compose keeps the
+image's probe and overrides the schedule:
+
+```yaml
+healthcheck:
+  interval: 5s
+  timeout: 2s
+  retries: 3
+  start_period: 20s
+```
+
+If you do write your own `test`: the image has **`curl`** and **not `wget`** (Debian
+base, not Alpine), and `$` needs no escaping in a Compose `CMD-SHELL` string —
+`docker compose config` echoes it back as `$$`, which is Compose quoting its own
+output, not a change to the value.
+
 ### Mounts
 
 | Mount | Default path | Behaviour |
@@ -424,6 +456,19 @@ As of **2026-08-12**, on the Jena 6.2.0 image:
 | Status breakdown | 21 `affected`, 13 `fix_deferred`, 1 `will_not_fix` |
 | Where they are | Debian 12 base packages — `perl`, `util-linux`, `zlib1g` |
 | In Fuseki, Jena or the JRE | **none** |
+
+**Every published image carries an SBOM**, so "is my tool in there?" is answerable
+without pulling it — 199 packages on the 6.2.0 image:
+
+```bash
+docker buildx imagetools inspect ghcr.io/semantic-partners/sp-fuseki:6.2.0 \
+  --format '{{json .SBOM}}' | jq -r '.["linux/amd64"].SPDX.packages[].name' | sort
+```
+
+(SPDX is just a standard JSON inventory format; syft writes it and buildx attaches
+it at publish. You don't need to know the format to grep the list.) That's how you
+confirm `curl` is present and `wget` isn't, rather than starting a shell to find
+out. Provenance attestations are attached the same way.
 
 Check it yourself rather than believing the table:
 
