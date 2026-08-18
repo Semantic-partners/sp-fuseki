@@ -392,6 +392,22 @@
              ;; on a PR it tells the contributor. ~20s, and the DB comes from a
              ;; registry rather than GitHub releases, so it's a different failure
              ;; domain from the download flakiness that plagued this pipeline.
+             ;; The README tells people to query the SBOM instead of starting a
+             ;; shell to find out what's installed. That is only true if the SBOM
+             ;; is actually attached and actually lists packages — `sbom: true` on
+             ;; the build step is the intention, this is the artifact.
+             (m :name "Verify the SBOM is attached and populated"
+                :env (m :IMAGE image :DIGEST "${{ steps.merge.outputs.digest }}")
+                :run (str "set -euo pipefail\n"
+                          "SBOM=\"$(docker buildx imagetools inspect \"${IMAGE}@${DIGEST}\" --format '{{json .SBOM}}')\"\n"
+                          "for plat in linux/amd64 linux/arm64; do\n"
+                          "  n=\"$(jq -r --arg p \"$plat\" '.[$p].SPDX.packages | length' <<< \"$SBOM\")\"\n"
+                          "  echo \"$plat: $n packages\"\n"
+                          "  [ \"$n\" -gt 50 ] || { echo \"::error::SBOM for $plat has $n packages — not populated\" >&2; exit 1; }\n"
+                          "  jq -e --arg p \"$plat\" '[.[$p].SPDX.packages[].name] | index(\"curl\")' <<< \"$SBOM\" >/dev/null \\\n"
+                          "    || { echo \"::error::SBOM for $plat does not list curl, which the healthcheck needs\" >&2; exit 1; }\n"
+                          "done\n"))
+
              (m :name "Trivy — fail only on vulnerabilities that HAVE a fix"
                 :uses "aquasecurity/trivy-action@v0.36.0"
                 :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")

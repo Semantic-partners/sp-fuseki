@@ -677,6 +677,17 @@
         (is (< (- (System/currentTimeMillis) t0) 9000)
             "docker stop must return inside the 10s kill timeout")))))
 
+(deftest s32-curl-is-present-and-wget-is-not
+  ;; The README tells anyone writing their own Compose healthcheck to use curl and
+  ;; not wget, and the image's own HEALTHCHECK depends on curl existing. Both are
+  ;; claims about the filesystem, so they get asserted rather than remembered.
+  (with-container [cid {}]
+    (wait-ping)
+    (is (exec-ok? cid "sh" "-c" "command -v curl >/dev/null")
+        "the image's HEALTHCHECK shells out to curl")
+    (is (not (exec-ok? cid "sh" "-c" "command -v wget >/dev/null"))
+        "README tells people wget is absent — if that changes, the docs are wrong")))
+
 ;; ---------------------------------------------------------------------------
 
 (defn -main [& _]
