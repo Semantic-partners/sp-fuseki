@@ -33,6 +33,7 @@ jobs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
       arches: ${{ steps.p.outputs.arches }}
+      arm_runner: ${{ steps.p.outputs.arm_runner }}
       image: ${{ steps.p.outputs.image }}
     steps:
     - uses: actions/checkout@v4
@@ -48,35 +49,36 @@ jobs:
         # A self-hosted runner executes whatever the workflow says, on a real
         # machine with persistent state and LAN access. Fork PRs get hosted
         # amd64 only — still tested, just not on our hardware.
-        #
-        # And if this repo is PUBLIC, no event is safe enough: approval settings
-        # are a checkbox someone can change, and GitHub's own guidance is not to
-        # use self-hosted runners with public repos at all. Fail rather than
-        # quietly dropping arm64 — a silently single-arch pipeline is worse, and
-        # the choice (fence the Mac, or move arm64 to hosted arm runners) is a
-        # decision someone has to take. See issue #9.
-        if [ "$IS_PUBLIC" = "false" ] && [ "$SAME_REPO" = "true" ]; then
+        # PUBLIC: arm64 goes to GitHub's free hosted arm runner, so the
+        # self-hosted Mac is never scheduled and the risk disappears rather
+        # than being fenced. Fork PRs are then safe on arm64 too — a hosted
+        # VM is disposable.
+        # PRIVATE: that label does not exist, so arm64 stays on the Mac and
+        # fork PRs get amd64 only.
+        if [ "$IS_PUBLIC" = "true" ]; then
+          ARM_RUNNER='"ubuntu-24.04-arm"'
           ARCHES='["amd64", "arm64"]'
-        elif [ "$IS_PUBLIC" = "true" ]; then
-          echo "::error::This repo is public and the arm64 leg targets a self-hosted" \
-               "runner. Move arm64 to hosted arm runners, or restrict the runner to" \
-               "private repos and remove this guard deliberately. See issue #9." >&2
-          exit 1
+        elif [ "$SAME_REPO" = "true" ]; then
+          ARM_RUNNER='["self-hosted", "macOS", "ARM64"]'
+          ARCHES='["amd64", "arm64"]'
         else
+          ARM_RUNNER='["self-hosted", "macOS", "ARM64"]'
           ARCHES='["amd64"]'
-          echo "fork PR: omitting the self-hosted arm64 leg"
+          echo "fork PR on a private repo: omitting the self-hosted arm64 leg"
         fi
+        echo "arm64 runner: $ARM_RUNNER"
         {
           echo "default=$DEF"
           echo "matrix=$MATRIX"
           echo "arches=$ARCHES"
+          echo "arm_runner=$ARM_RUNNER"
           # GHCR requires a lowercase image name.
           echo "image=${REGISTRY}/${OWNER}/sp-fuseki"
         } >> "$GITHUB_OUTPUT"
         echo "jena legs: $MATRIX  (latest -> $DEF)"
   test:
     needs: plan
-    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON(needs.plan.outputs.arm_runner) || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -108,7 +110,7 @@ jobs:
     - plan
     - test
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('["self-hosted", "macOS", "ARM64"]') || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON(needs.plan.outputs.arm_runner) || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
