@@ -159,6 +159,21 @@
     (testing "and it runs on PRs — telling a contributor beats telling main"
       (is (nil? (:if gate))))))
 
+(deftest the-sbom-is-produced-and-then-checked
+  ;; `sbom: true` is the intention; the merge job checks the artifact. The README
+  ;; tells people to query it instead of shelling into the image, so an empty or
+  ;; missing SBOM would make a documented workflow silently useless.
+  (let [build (step-named :publish "Build + push by digest")
+        check (step-named :merge "Verify the SBOM")]
+    (is (true? (get-in build [:with :sbom])) "publish must attach an SBOM")
+    (is (true? (get-in build [:with :provenance])) "and provenance")
+    (is (some? check) "merge must verify it")
+    (testing "on both architectures, not just the one that happens to be first"
+      (is (str/includes? (:run check) "linux/amd64"))
+      (is (str/includes? (:run check) "linux/arm64")))
+    (testing "and asserts a package the healthcheck actually depends on"
+      (is (str/includes? (:run check) "curl")))))
+
 (deftest the-full-report-never-blocks-and-is-kept
   (let [report (step-named :merge "full report")
         keep-  (step-named :merge "Keep the report")]
