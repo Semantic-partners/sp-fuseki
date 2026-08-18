@@ -102,19 +102,31 @@
   (testing "publish never runs for a fork at all"
     (is (str/includes? (:if (job :publish)) "head.repo.full_name == github.repository"))))
 
-(deftest a-public-repo-refuses-to-use-the-self-hosted-runner
-  ;; Issue #9's two org settings are checkboxes; this is the part that can't be
-  ;; un-ticked by accident. Failing beats silently dropping arm64 — the merge job
-  ;; would then reject the single-arch manifest with a more confusing error.
+(deftest a-public-repo-routes-arm64-to-hosted-runners
+  ;; Issue #9 asked how to keep fork PRs off the self-hosted Mac once this repo is
+  ;; public. Routing beats fencing: on a public repo arm64 goes to GitHub's free
+  ;; `ubuntu-24.04-arm`, so the Mac is never scheduled and the risk is gone rather
+  ;; than guarded. The earlier version hard-failed the build instead, which would
+  ;; have put main red in the window between flipping public and switching runners.
+  ;;
+  ;; It has to be decided at RUNTIME, not pinned: `ubuntu-24.04-arm` does not work
+  ;; in a private repo (the workflow fails outright), and this repo is private now
+  ;; and public later. One workflow must be correct on both sides of that.
   (let [script (:run (second (:steps (job :plan))))]
     (is (str/includes? (get-in (job :plan) [:env :IS_PUBLIC]) "repository.private == false")
         "plan must know whether the repo is public")
-    (is (str/includes? script "IS_PUBLIC")
-        "and act on it")
-    (is (str/includes? script "::error::")
-        "with a GitHub-annotated error, not a bare exit")
-    (is (str/includes? script "issue #9")
-        "naming where the decision lives")))
+    (is (str/includes? script "ubuntu-24.04-arm")
+        "public routes arm64 to the free hosted arm runner")
+    (is (str/includes? script "arm_runner=")
+        "and exports it for the jobs")
+    (testing "private keeps the self-hosted labels, since the hosted label would fail"
+      (is (str/includes? script "[\"self-hosted\", \"macOS\", \"ARM64\"]")))
+    (testing "fork PRs lose arm64 only while private — on a public repo it is a disposable VM"
+      (is (str/includes? script "fork PR on a private repo"))))
+  (testing "the jobs take the runner from plan rather than hardcoding it"
+    (doseq [id [:test :publish]]
+      (is (str/includes? (:runs-on (job id)) "fromJSON(needs.plan.outputs.arm_runner)")
+          (str id " must not pin the arm64 runner")))))
 
 (deftest cosign-is-installed-by-us-with-verification
   ;; sigstore/cosign-installer single-shots a GitHub release download, which
@@ -209,15 +221,19 @@
       (testing "labels, not the runner's name — a name matches nothing"
         (is (not (str/includes? ro "macanton-sp")))))))
 
-(deftest the-runner-label-array-is-valid-json
-  ;; fromJSON() parses JSON, not YAML. Emitting YAML flow style here produced
-  ;; `[self-hosted, macOS, ARM64] ` — accepted by no one, and it would have
-  ;; surfaced as a runtime failure on every arm64 job.
-  (doseq [id [:test :publish]]
-    (let [[_ arr] (re-find #"fromJSON\('(\[.*?\])'\)" (:runs-on (job id)))]
-      (is (some? arr))
-      (is (= w/mac-arm64 (json/parse-string arr))
-          "must round-trip as JSON to exactly the label set"))))
+(deftest every-runner-value-plan-emits-is-valid-json
+  ;; fromJSON parses JSON, not YAML. This used to check a literal array in
+  ;; `runs-on`; the value now comes from plan at runtime, so the check follows it
+  ;; there. A malformed value here fails every arm64 job at scheduling time.
+  (let [script (:run (second (:steps (job :plan))))
+        vals   (map second (re-seq #"ARM_RUNNER='([^']+)'" script))]
+    (is (= 3 (count vals)) "public, same-repo private, and fork-PR private")
+    (doseq [v vals]
+      (is (some? (json/parse-string v)) (str "not valid JSON: " v)))
+    (testing "the public branch is the free hosted arm runner"
+      (is (some #{"ubuntu-24.04-arm"} (map json/parse-string vals))))
+    (testing "the private branches are exactly the known self-hosted label set"
+      (is (some #(= w/mac-arm64 %) (map json/parse-string vals))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Structure we rely on elsewhere
