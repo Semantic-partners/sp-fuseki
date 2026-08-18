@@ -26,7 +26,7 @@ find it isn't, that's a bug, and we'd love to know.** Confusing default,
 behaviour that surprised you, a doc that says one thing while the image does
 another, an error message that sent you the wrong way: all fair game. Open an
 issue, and **PRs are very welcome**. If you add or change an extension point,
-add its assertion to [test/smoke.sh](test/smoke.sh) — that's what stops the
+add its assertion to [test/smoke.clj](test/smoke.clj) — that's what stops the
 README drifting away from what the container actually does.
 
 > **Status: v0.1, published to GHCR.** One image, both postures: **Fuseki's own
@@ -76,6 +76,44 @@ curl -G http://localhost:3030/ds/sparql --data-urlencode 'query=SELECT * { ?s ?p
 ## Extension points (the contract)
 
 Everything the image does is driven by these — nothing is hidden in a script.
+
+### The entrypoint — don't replace it
+
+```
+ENTRYPOINT ["bb", "/opt/sp-fuseki/entrypoint.clj"]     # and no CMD
+```
+
+**You do not need to set an `ENTRYPOINT`, and you should not.** It is what resolves
+your config (mounted `config.ttl`, else `fuseki.edn`, else a generated default),
+renders `shiro.ini`, writes the effective config and the resolved port where the
+healthcheck reads it, and then execs Fuseki. Override it and you get a Fuseki with
+none of the contract on this page — the mounts and env vars below stop doing
+anything, silently.
+
+**You do not need `tini` or `--init` either.** The entrypoint `exec`s, so the JVM
+*replaces* it and becomes PID 1 directly:
+
+```console
+$ docker exec <container> cat /proc/1/cmdline | tr '\0' ' '
+java -jar /opt/fuseki/fuseki-server.jar --port=3030 --config=/fuseki/run/config.effective.ttl
+```
+
+There is no shell left to leak zombies or swallow signals, and the JVM handles
+`SIGTERM` itself — `docker stop` returns immediately rather than waiting out the
+10-second kill timeout. If you are porting from an image whose Dockerfile said
+`ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]`, drop both halves: the init
+shim and the shell script.
+
+**If you need work done before Fuseki starts**, reach for the seams below rather
+than wrapping the entrypoint — that is what they are for. If you genuinely must run
+something first, your wrapper has to `exec` ours as its last line, or you inherit
+PID 1 and the signal handling that comes with it.
+
+For poking around, `--entrypoint` is still fine and changes nothing permanent:
+
+```bash
+docker run --rm -it --entrypoint sh ghcr.io/semantic-partners/sp-fuseki
+```
 
 ### Mounts
 
