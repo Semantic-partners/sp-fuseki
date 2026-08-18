@@ -662,6 +662,21 @@
       (is (= 200 (status (str base "/$/ping")))
           "no config mounted anywhere still boots the generated default"))))
 
+(deftest s31-the-entrypoint-execs-so-the-jvm-is-pid-1
+  ;; The README tells anyone porting from another image that they need neither
+  ;; tini nor --init, because bb `exec`s and the JVM replaces it as PID 1. That is
+  ;; a claim about the container, so it gets asserted like the rest: swap p/exec
+  ;; for p/shell in the entrypoint and this test fails.
+  (with-container [cid {}]
+    (wait-ping)
+    (is (= "java" (str/trim (str (:out (docker "exec" cid "cat" "/proc/1/comm")))))
+        "PID 1 must be the JVM — a shell there leaks zombies and swallows SIGTERM")
+    (testing "and SIGTERM is handled, rather than timing out into a SIGKILL"
+      (let [t0 (System/currentTimeMillis)]
+        (docker "stop" cid)
+        (is (< (- (System/currentTimeMillis) t0) 9000)
+            "docker stop must return inside the 10s kill timeout")))))
+
 ;; ---------------------------------------------------------------------------
 
 (defn -main [& _]
