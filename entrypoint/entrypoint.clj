@@ -33,6 +33,7 @@
 ;; The EDN's copies apply only when the EDN is the config source; a mounted
 ;; config.ttl means the EDN was ignored wholesale.
 ;;   FUSEKI_TDB2_ROOT             where :tdb2 datasets live      (default /fuseki/databases)
+;;   FUSEKI_PRESTART              directory of pre-start hooks   (default /fuseki/pre-start.d)
 ;;   FUSEKI_JAR                   fuseki-server.jar             (default /opt/fuseki/fuseki-server.jar)
 ;;
 ;; Config resolution (config-respecting, never silently regenerated):
@@ -47,6 +48,7 @@
 (require '[babashka.fs :as fs]
          '[babashka.process :as p]
          '[clojure.string :as str]
+         '[sp-fuseki.prestart :as prestart]
          '[sp-fuseki.render :as render])
 
 (defn env [k d] (or (System/getenv k) d))
@@ -74,6 +76,11 @@
 (def port-default "3030")
 (def ds-name   (env "FUSEKI_DATASET"    "ds"))
 (def tdb2-root (env "FUSEKI_TDB2_ROOT"  "/fuseki/databases"))
+;; Raw as well as resolved, same reason as FUSEKI_CONFIG above: an absent default
+;; directory means "no hooks, carry on", while an absent directory someone
+;; explicitly named is an instruction we could not honour.
+(def env-prestart   (System/getenv "FUSEKI_PRESTART"))
+(def prestart-dir   (or env-prestart "/fuseki/pre-start.d"))
 
 ;; Settings the EDN can also carry. Held as raw env so "explicitly set" is
 ;; distinguishable from "defaulted" — that distinction IS the precedence rule:
@@ -132,7 +139,8 @@
 (def ^:private consumed
   #{"FUSEKI_BASE" "FUSEKI_CONFIG" "FUSEKI_EDN" "FUSEKI_SHIRO" "FUSEKI_PORT"
     "FUSEKI_DATASET" "FUSEKI_AUTH" "FUSEKI_UI" "FUSEKI_JAR" "FUSEKI_TDB2_ROOT"
-    "FUSEKI_ADMIN_USER" "FUSEKI_ADMIN_PASSWORD" "FUSEKI_ADMIN_PASSWORD_FILE"})
+    "FUSEKI_ADMIN_USER" "FUSEKI_ADMIN_PASSWORD" "FUSEKI_ADMIN_PASSWORD_FILE"
+    "FUSEKI_PRESTART"})
 
 (def ^:private inherited-from-elsewhere
   "Names Fuseki's own scripts and the base image set, which are not ours to
@@ -332,11 +340,98 @@
                   (attempt "auth" #(render/shiro-basic user pw)))
         (die "auth must be 'anon' or 'basic', got:" mode)))))
 
+;; ---------------------------------------------------------------------------
+;; Pre-start hooks — the seam for work that must happen before Fuseki
+;; ---------------------------------------------------------------------------
+;;
+;; Executable files in FUSEKI_PRESTART, run in filename order, before anything is
+;; resolved. Before, deliberately: the most useful thing a hook can do is produce
+;; the config — fetch a secret, template a fuseki.edn, restore a backup into
+;; FUSEKI_TDB2_ROOT — and a hook that ran after resolution could not.
+;;
+;; This exists because the alternative people reach for does not work. The image
+;; sets ENTRYPOINT and no CMD, so a `command:` in Compose or a CMD in a derived
+;; image arrives as ARGUMENTS to this script, which never read them: the work was
+;; silently skipped and the container came up looking fine. Refusing those
+;; arguments (see -main) closes the silent half; this opens the door they were
+;; trying to use.
+;;
+;; The other route stays valid and is documented in the README: a wrapper
+;; ENTRYPOINT whose last line `exec`s ours. That is the right tool when you need
+;; to run as root or replace the boot entirely. A mounted script is the right tool
+;; when you do not, and it needs no derived image.
+;;
+;; Hooks run as uid 1000 with this process's environment, and their output goes to
+;; the container log. A non-zero exit is FATAL: a hook that failed is a boot whose
+;; preconditions did not hold, and starting anyway is how a "seed the database"
+;; step becomes a live empty server.
+
+(defn- prestart-entries
+  "The directory listing, as the data `plan` wants. Kept here so the decision it
+  feeds stays pure and unit-tested."
+  [dir]
+  (for [f (sort (fs/list-dir dir))]
+    {:name        (str (fs/file-name f))
+     :dir?        (fs/directory? f)
+     :executable? (fs/executable? f)}))
+
+(defn run-pre-start!
+  "Run the hooks, or die trying. Returns nil."
+  []
+  (let [exists? (fs/exists? prestart-dir)
+        dir?    (and exists? (fs/directory? prestart-dir))
+        {:keys [error run ignored skip]}
+        (prestart/plan {:path      prestart-dir
+                        :explicit? (some? env-prestart)
+                        :exists?   exists?
+                        :dir?      dir?
+                        :entries   (when dir? (prestart-entries prestart-dir))})]
+    (when error (die "pre-start:" error))
+    (when (= :empty skip)
+      (log "pre-start:" prestart-dir "is empty — nothing to run"))
+    (when (seq ignored)
+      (log "pre-start: ignoring" (str/join ", " ignored)
+           "— hooks are executable files, and dotfiles are left alone"))
+    (doseq [name run
+            :let [path (str prestart-dir "/" name)]]
+      (log "pre-start: running" path)
+      ;; :continue so a failure is OUR message naming the script and its exit
+      ;; code, not babashka's stack trace. Output is inherited, so whatever the
+      ;; hook prints lands in the container log where the operator is looking.
+      (let [{:keys [exit]} (p/shell {:continue true} path)]
+        (when-not (zero? exit)
+          (die "pre-start:" path "exited" exit "— refusing to start Fuseki."
+               "A hook that failed means a precondition did not hold."))
+        (log "pre-start:" path "ok")))))
+
 (defn -main []
+  ;; Arguments are refused, loudly, before anything else happens.
+  ;;
+  ;; ENTRYPOINT is set and there is no CMD, so anything you put in `command:` (or
+  ;; a CMD in a derived image) lands here as argv. This script used to ignore it:
+  ;; a pre-start script wired up that way never ran, printed nothing, and the
+  ;; container came up healthy — an instruction we did not carry out and did not
+  ;; mention, which is the one thing this image is built not to do.
+  ;; ONE string, not varargs: `die` is println, and a newline as its own argument
+  ;; leaves a trailing space at the end of every line above it.
+  (when (seq *command-line-args*)
+    (die (str "this image takes no arguments, and got: "
+              (str/join " " *command-line-args*)
+              "\n  Nothing you pass as CMD or `command:` reaches Fuseki — ENTRYPOINT resolves"
+              "\n  the config and execs the server itself."
+              "\n  To run something before Fuseki starts: mount it executable into"
+              "\n    " prestart-dir "/10-yours.sh   (or set FUSEKI_PRESTART)"
+              "\n  To replace the boot entirely: a wrapper ENTRYPOINT whose last line execs"
+              "\n    bb /opt/sp-fuseki/entrypoint.clj"
+              "\n  To poke around: docker run --rm -it --entrypoint sh <image>")))
   (fs/create-dirs base)
   ;; Before anything is resolved, so a migrator sees "that variable did nothing"
   ;; above the lines showing what happened instead.
   (report-unused-env!)
+  ;; Before resolve-config, so a hook can write the very config we are about to
+  ;; read. Documented in the README as part of the contract, not an accident of
+  ;; ordering.
+  (run-pre-start!)
   (let [eff-cfg   (str base "/config.effective.ttl")
         eff-shiro (str base "/shiro.ini")   ; Fuseki discovers shiro.ini in FUSEKI_BASE
         eff-port  (str base "/port")        ; read by the image's HEALTHCHECK

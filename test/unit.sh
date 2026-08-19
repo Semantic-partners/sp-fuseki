@@ -18,14 +18,17 @@ command -v bb >/dev/null 2>&1 || {
 
 echo "== sp-fuseki unit tests =="
 cd "$ROOT"
-# Three suites: the fuseki.edn renderer contract, the CI workflow itself
+# Four suites: the fuseki.edn renderer contract, the CI workflow itself
 # (generated from ci/sp_fuseki/workflows.clj precisely so it can be tested), and
 # image/Dockerfile's build-time guarantees — the checksum verification a running
 # container cannot reveal, because a corrupted artifact that still unpacks boots
-# fine and passes every behavioural test.
+# fine and passes every behavioural test. And the pre-start hook's decisions —
+# which files run, in what order, and which refuse the boot outright.
 bb --classpath "entrypoint:ci:test" \
-   -e '(require (quote render-test) (quote workflows-test) (quote dockerfile-test))
+   -e '(require (quote render-test) (quote workflows-test) (quote dockerfile-test)
+                (quote prestart-test))
        (let [{:keys [fail error]} (clojure.test/run-tests (quote render-test)
                                                           (quote workflows-test)
-                                                          (quote dockerfile-test))]
+                                                          (quote dockerfile-test)
+                                                          (quote prestart-test))]
          (System/exit (if (pos? (+ fail error)) 1 0)))'
