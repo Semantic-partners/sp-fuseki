@@ -194,7 +194,7 @@ ENV BABASHKA_CLASSPATH=/opt/sp-fuseki
 # create the MISSING PARENT root-owned, and Fuseki then dies "Not writable"
 # before it has served anything. Creating it here costs an empty directory.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin fuseki \
- && mkdir -p /fuseki/run/configuration /fuseki/databases \
+ && mkdir -p /fuseki/run/configuration /fuseki/databases /fuseki/pre-start.d \
  && chown -R fuseki:fuseki /fuseki
 
 # Both binaries must actually run on THIS arch — the one thing the fetch stage

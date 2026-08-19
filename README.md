@@ -104,10 +104,28 @@ There is no shell left to leak zombies or swallow signals, and the JVM handles
 `ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]`, drop both halves: the init
 shim and the shell script.
 
-**If you need work done before Fuseki starts**, reach for the seams below rather
-than wrapping the entrypoint — that is what they are for. If you genuinely must run
-something first, your wrapper has to `exec` ours as its last line, or you inherit
-PID 1 and the signal handling that comes with it.
+**The image takes no arguments, and says so.** There is no `CMD`, so anything you
+put in `command:` (Compose) or `CMD` (a derived image) arrives as argv to the
+entrypoint — where it reaches neither Fuseki nor a shell. It used to be ignored
+silently, which meant a lock check or a migration wired up that way never ran and
+never said so. Now it stops the boot and points at the two things that do work:
+
+```console
+$ docker run --rm ghcr.io/semantic-partners/sp-fuseki /my/setup.sh
+[sp-fuseki] FATAL: this image takes no arguments, and got: /my/setup.sh
+  Nothing you pass as CMD or `command:` reaches Fuseki — ENTRYPOINT resolves
+  the config and execs the server itself.
+  To run something before Fuseki starts: mount it executable into
+    /fuseki/pre-start.d/10-yours.sh   (or set FUSEKI_PRESTART)
+  To replace the boot entirely: a wrapper ENTRYPOINT whose last line execs
+    bb /opt/sp-fuseki/entrypoint.clj
+  To poke around: docker run --rm -it --entrypoint sh <image>
+```
+
+**If you need work done before Fuseki starts**, mount a hook — see below. If you
+genuinely must replace the boot (running as root, say), your wrapper has to `exec`
+ours as its last line, or you inherit PID 1 and the signal handling that comes with
+it.
 
 For poking around, `--entrypoint` is still fine and changes nothing permanent:
 
@@ -155,6 +173,7 @@ output, not a change to the value.
 | EDN config | `/fuseki/fuseki.edn` | If present (and no `config.ttl`), validated and **rendered** to assembler TTL — see below. |
 | Shiro auth config | `/fuseki/shiro.ini` | If present, **honoured untouched** (your escape hatch for any auth setup, incl. SOPS-decrypted secrets). If absent, generated from `FUSEKI_AUTH`. |
 | **Persistent data** | `/fuseki/databases` | **Mount your volume here** for TDB2 datasets. Pre-created in the image and owned by uid 1000 — see below. |
+| Pre-start hooks | `/fuseki/pre-start.d` | Executable scripts run in filename order **before** the config is resolved — see below. Optional; absent is the normal case. |
 
 The **effective** config and shiro that actually run are always written to
 `$FUSEKI_BASE` (`config.effective.ttl`, `shiro.ini`) and their paths logged at
@@ -393,6 +412,7 @@ Creating it in the image costs an empty directory and removes the trap.
 | `FUSEKI_CONFIG` | `/fuseki/config.ttl` | Where to look for a mounted assembler config. |
 | `FUSEKI_EDN` | `/fuseki/fuseki.edn` | Where to look for a mounted EDN config (used only if no `config.ttl`). |
 | `FUSEKI_TDB2_ROOT` | `/fuseki/databases` | Directory `:tdb2` datasets are rendered under. |
+| `FUSEKI_PRESTART` | `/fuseki/pre-start.d` | Directory of pre-start hooks. Set it and the directory must exist — a path you asked for and we cannot find is fatal. |
 | `FUSEKI_SHIRO` | `/fuseki/shiro.ini` | Where to look for a mounted shiro.ini. |
 | `FUSEKI_PORT` | `3030` | Listen port. Also settable as `:server {:port n}` in `fuseki.edn`; env wins. The healthcheck follows whichever applied. |
 | `FUSEKI_DATASET` | `ds` | Name of the generated default dataset (when no config mounted). |
@@ -411,6 +431,63 @@ file, and a mounted `shiro.ini`) are covered by [smoke.sh](test/smoke.sh) §14�
 manager: a credential arrives via env, a `*_FILE` path, or your own mounted
 `shiro.ini`. Whatever delivers it (Vault, SOPS, Docker secrets) just needs to
 land it in one of those. Don't commit a plaintext password anywhere.
+
+### Pre-start hooks — work that must happen before Fuseki
+
+Mount executable scripts into `/fuseki/pre-start.d` and they run in filename order,
+as uid 1000, before anything is resolved:
+
+```yaml
+services:
+  fuseki:
+    image: ghcr.io/semantic-partners/sp-fuseki:6.2.0
+    volumes:
+      - ./hooks:/fuseki/pre-start.d:ro     # 10-fetch-secret.sh, 20-restore.sh, …
+      - ./data:/fuseki/databases
+```
+
+**Before anything is resolved** is the useful part: a hook can write the very
+`fuseki.edn` the boot then reads. Fetch a secret, template a config from a service
+discovery lookup, restore a backup into `/fuseki/databases` — all of it produces
+input the boot consumes, so it has to come first.
+
+Their output goes to the container log, between the environment warnings and the
+config lines, and each one is named as it runs:
+
+```
+[sp-fuseki] pre-start: running /fuseki/pre-start.d/10-restore.sh
+restoring 4.2 GB from s3://…
+[sp-fuseki] pre-start: /fuseki/pre-start.d/10-restore.sh ok
+[sp-fuseki] effective config -> /fuseki/run/config.effective.ttl (rendered from /fuseki/fuseki.edn)
+```
+
+**Hooks fail closed.** A non-zero exit stops the boot, naming the script and the
+code; later hooks do not run. A hook that failed means a precondition did not hold,
+and starting anyway is how "seed the database" becomes a live empty server.
+
+**A hook that is not executable is also fatal**, with the `chmod +x` you need. That
+bit goes missing easily — a bind mount from a filesystem without it, a checkout on
+Windows — and warning-and-skipping would hand you the silent no-op this seam exists
+to replace.
+
+Dotfiles and subdirectories are ignored (and listed in the log, so nothing
+disappears quietly). That is deliberate: Kubernetes builds ConfigMap and Secret
+volumes out of `..data` symlinks and timestamped staging directories, and refusing
+those would make the feature unusable exactly where people mount things from.
+
+| Situation | What happens |
+|---|---|
+| No `/fuseki/pre-start.d`, or an empty one | Nothing, silently. The overwhelmingly common case. |
+| `FUSEKI_PRESTART` set to a path that is not there | **Fatal.** A path you asked for and we cannot find is an instruction we could not honour. |
+| Hook exits non-zero | **Fatal**, naming the script and its exit code. Later hooks skipped. |
+| Hook is not executable | **Fatal**, naming the file and the fix. Nothing runs. |
+| Hook needs root | Not this seam — use a wrapper `ENTRYPOINT`, and `exec` ours at the end. |
+
+> **Do you actually need one?** If the hook is a TDB2 lock check, probably not: Jena
+> takes an OS lock on `tdb.lock`, the kernel releases it when the process dies, and
+> a crash-restart on the same volume boots clean. Two containers opening one volume
+> at once fail on the second, which is the outcome you want — and *deleting* the
+> lock file to "fix" that turns a refusal into two live writers on one database.
 
 ### The admin API (`/$/…`)
 
