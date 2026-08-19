@@ -68,12 +68,15 @@
 (defn- start
   "docker run -d with `args`, returning the container id. Publishes host-port to
   `cport` inside (default 3030)."
-  [{:keys [env mounts cport args] :or {cport "3030"}}]
+  [{:keys [env mounts cport args cmd] :or {cport "3030"}}]
   (let [flags (concat ["run" "-d" "-p" (str host-port ":" cport)]
                       (mapcat (fn [[k v]] ["-e" (str k "=" v)]) env)
                       (mapcat (fn [m] ["-v" m]) mounts)
                       args
-                      [image])
+                      [image]
+                      ;; AFTER the image, so it is the container's argv rather than
+                      ;; a docker flag. That distinction is the subject of s33.
+                      cmd)
         {:keys [out err exit]} (apply docker flags)]
     (when-not (zero? exit)
       (throw (ex-info (str "docker run failed: " err) {})))
@@ -146,11 +149,12 @@
 
   A FATAL config exits immediately and returns fast; a healthy one returns after
   settle-ms. The warnings callers assert are printed before Fuseki starts."
-  [{:keys [env mounts]} & [{:keys [settle-ms] :or {settle-ms 6000}}]]
+  [{:keys [env mounts cmd]} & [{:keys [settle-ms] :or {settle-ms 6000}}]]
   (let [flags (concat ["run" "-d"]
                       (mapcat (fn [[k v]] ["-e" (str k "=" v)]) env)
                       (mapcat (fn [m] ["-v" m]) mounts)
-                      [image])
+                      [image]
+                      cmd)
         {:keys [out err exit]} (apply docker flags)
         cid (str/trim (str out))]
     ;; Guard before the try: a failed `docker run` leaves an error fragment here,
@@ -176,6 +180,22 @@
   ;; Parents created, so a fixture can be nested — #include's whole point is a
   ;; config directory, which needs one.
   (let [f (str tmp "/" name)] (fs/create-dirs (fs/parent f)) (spit f content) f))
+
+(defn- hooks-dir
+  "A directory of pre-start hooks, as `{name [content executable?]}`. Returns the
+  host path to mount at /fuseki/pre-start.d.
+
+  The executable bit is set explicitly rather than left to the umask, because
+  whether a hook is executable is the subject of s37 and must not depend on how
+  the checkout was made."
+  [dir-name files]
+  (let [d (str tmp "/" dir-name)]
+    (fs/create-dirs d)
+    (doseq [[name [content executable?]] files
+            :let [f (str d "/" name)]]
+      (spit f content)
+      (fs/set-posix-file-permissions f (if executable? "rwxr-xr-x" "rw-r--r--")))
+    d))
 
 (def sample-ttl (str here "/sample.ttl"))
 (def inference-ttl (str here "/inference.ttl"))
@@ -687,6 +707,109 @@
         "the image's HEALTHCHECK shells out to curl")
     (is (not (exec-ok? cid "sh" "-c" "command -v wget >/dev/null"))
         "README tells people wget is absent — if that changes, the docs are wrong")))
+
+;; ---------------------------------------------------------------------------
+;; 33-38. arguments, and the pre-start seam that replaces them
+;; ---------------------------------------------------------------------------
+
+(deftest s33-arguments-are-refused-instead-of-ignored
+  ;; The reason this section exists. The image sets ENTRYPOINT and no CMD, so a
+  ;; `command:` in Compose arrives as argv to the entrypoint, which used to read
+  ;; none of it: a lock check or a migration wired up that way never ran, said
+  ;; nothing, and the container came up healthy. Silence about an instruction we
+  ;; did not carry out is the one thing this image is built not to do.
+  (let [out (boot-output {:cmd ["/bin/echo" "SMOKE-CMD-RAN"]})]
+    (is (str/includes? out "takes no arguments")
+        "the entrypoint must refuse argv rather than drop it")
+    ;; The token appears in the refusal itself — it quotes the argv back at you,
+    ;; which is most of its value. So the assertion is that no line IS the token,
+    ;; which is what `echo` running would produce.
+    (is (not (some #(= "SMOKE-CMD-RAN" (str/trim %)) (str/split-lines out)))
+        "and the argument must not have run — if it did, the refusal came too late")
+    (is (not (str/includes? out "exec: java"))
+        "Fuseki must not start: a boot with an unhonoured instruction is not a good boot")
+    (testing "and the message routes you to both supported seams"
+      (is (str/includes? out "/fuseki/pre-start.d")
+          "the mounted-hook route")
+      (is (str/includes? out "--entrypoint sh")
+          "and the poke-around route, which is what most people passing a command actually wanted"))))
+
+(deftest s34-pre-start-hooks-run-in-order-before-the-config-is-resolved
+  (let [d (hooks-dir "hooks-order"
+                     {"20-second.sh" ["#!/bin/sh\necho HOOK-TWO\n" true]
+                      "10-first.sh"  ["#!/bin/sh\necho HOOK-ONE\n" true]})
+        out (boot-output {:mounts [(str d ":/fuseki/pre-start.d:ro")]})]
+    (is (str/includes? out "HOOK-ONE") "the first hook ran")
+    (is (str/includes? out "HOOK-TWO") "the second hook ran")
+    (is (< (str/index-of out "HOOK-ONE") (str/index-of out "HOOK-TWO"))
+        "in filename order — the 10-/20- convention is the only one anyone expects")
+    (is (< (str/index-of out "HOOK-TWO") (str/index-of out "effective config ->"))
+        "and before the config is resolved, which is what makes a config-writing hook possible")
+    (is (str/includes? out "pre-start: running /fuseki/pre-start.d/10-first.sh")
+        "each hook is named as it runs, so a hook that hung is identifiable from the log alone")))
+
+(deftest s35-a-hook-can-write-the-config-that-then-gets-used
+  ;; The reason hooks run before resolution rather than after. This is the shape of
+  ;; every real use we were shown: fetch a secret, template a config, restore a
+  ;; backup — all of them produce input the boot then consumes.
+  (let [d (hooks-dir "hooks-config"
+                     {"10-write-edn.sh"
+                      [(str "#!/bin/sh\n"
+                            "cat > /fuseki/fuseki.edn <<'EDN'\n"
+                            "{:datasets [{:name \"written-by-hook\" :storage :mem "
+                            ":endpoints #{:query :gsp-rw}}]}\n"
+                            "EDN\n")
+                       true]})]
+    (with-container [cid {:mounts [(str d ":/fuseki/pre-start.d:ro")]}]
+      (wait-ping)
+      (is (ask (str base "/written-by-hook/sparql") "ASK {}")
+          "the dataset the hook wrote is the one being served")
+      (is (= 404 (status (str base "/ds/sparql?query=ASK%20%7B%7D")))
+          "and the generated default is absent — the hook's config was used, not merged with one"))))
+
+(deftest s36-a-failing-hook-stops-the-boot
+  ;; Fail closed. A hook that failed means a precondition did not hold, and
+  ;; starting anyway is how "seed the database" becomes a live empty server.
+  (let [d (hooks-dir "hooks-fail"
+                     {"10-ok.sh"    ["#!/bin/sh\necho HOOK-RAN\n" true]
+                      "20-boom.sh"  ["#!/bin/sh\necho ABOUT-TO-FAIL\nexit 3\n" true]
+                      "30-never.sh" ["#!/bin/sh\necho HOOK-THREE\n" true]})
+        out (boot-output {:mounts [(str d ":/fuseki/pre-start.d:ro")]})]
+    (is (str/includes? out "HOOK-RAN") "hooks before the failure did run")
+    (is (str/includes? out "exited 3")
+        "the exit code is reported — 'a hook failed' without the code sends you to the wrong script")
+    (is (str/includes? out "20-boom.sh") "and the script is named")
+    (is (not (str/includes? out "HOOK-THREE"))
+        "later hooks must not run: they were ordered after the one that failed for a reason")
+    (is (not (str/includes? out "exec: java"))
+        "and Fuseki must not start")))
+
+(deftest s37-a-hook-without-its-executable-bit-is-fatal
+  ;; The likeliest mistake in practice, and the one where warn-and-skip would
+  ;; reproduce the exact bug this feature exists to end: a healthy container whose
+  ;; hook never ran.
+  (let [d (hooks-dir "hooks-noexec"
+                     {"10-seed.sh" ["#!/bin/sh\necho SHOULD-NOT-RUN\n" false]})
+        out (boot-output {:mounts [(str d ":/fuseki/pre-start.d:ro")]})]
+    (is (str/includes? out "not executable") "refused")
+    (is (str/includes? out "chmod +x") "with the fix, not just the fault")
+    (is (str/includes? out "10-seed.sh") "naming the file")
+    (is (not (str/includes? out "SHOULD-NOT-RUN")) "and it did not run")
+    (is (not (str/includes? out "exec: java")) "and Fuseki did not start")))
+
+(deftest s38-hooks-are-optional-and-an-explicit-missing-path-is-fatal
+  (testing "no hook directory is the normal, quiet case"
+    (let [out (boot-output {})]
+      (is (not (str/includes? out "pre-start:"))
+          "an absent default directory says nothing — a line on every boot trains people to skim")
+      (is (str/includes? out "exec: java") "and the boot is unaffected")))
+  (testing "but a path someone explicitly asked for and that is not there stops the boot"
+    ;; Same rule as FUSEKI_CONFIG (s28): absence of a default means carry on,
+    ;; absence of an instruction does not.
+    (let [out (boot-output {:env {"FUSEKI_PRESTART" "/fuseki/nope.d"}})]
+      (is (str/includes? out "FATAL") "fatal")
+      (is (str/includes? out "/fuseki/nope.d") "naming the path it was given")
+      (is (not (str/includes? out "exec: java")) "and Fuseki did not start"))))
 
 ;; ---------------------------------------------------------------------------
 
