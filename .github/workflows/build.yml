@@ -27,13 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTRA_JENA: ''
-      SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      IS_PUBLIC: ${{ github.event.repository.private == false }}
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
-      arches: ${{ steps.p.outputs.arches }}
-      arm_runner: ${{ steps.p.outputs.arm_runner }}
       image: ${{ steps.p.outputs.image }}
     steps:
     - uses: actions/checkout@v4
@@ -46,44 +42,23 @@ jobs:
         # shellcheck disable=SC2086
         MATRIX="$(printf '%s\n' $EXTRA_JENA "$DEF" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)"
         OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-        # A self-hosted runner executes whatever the workflow says, on a real
-        # machine with persistent state and LAN access. Fork PRs get hosted
-        # amd64 only — still tested, just not on our hardware.
-        # PUBLIC: arm64 goes to GitHub's free hosted arm runner, so the
-        # self-hosted Mac is never scheduled and the risk disappears rather
-        # than being fenced. Fork PRs are then safe on arm64 too — a hosted
-        # VM is disposable.
-        # PRIVATE: that label does not exist, so arm64 stays on the Mac and
-        # fork PRs get amd64 only.
-        if [ "$IS_PUBLIC" = "true" ]; then
-          ARM_RUNNER='"ubuntu-24.04-arm"'
-          ARCHES='["amd64", "arm64"]'
-        elif [ "$SAME_REPO" = "true" ]; then
-          ARM_RUNNER='["self-hosted", "macOS", "ARM64"]'
-          ARCHES='["amd64", "arm64"]'
-        else
-          ARM_RUNNER='["self-hosted", "macOS", "ARM64"]'
-          ARCHES='["amd64"]'
-          echo "fork PR on a private repo: omitting the self-hosted arm64 leg"
-        fi
-        echo "arm64 runner: $ARM_RUNNER"
         {
           echo "default=$DEF"
           echo "matrix=$MATRIX"
-          echo "arches=$ARCHES"
-          echo "arm_runner=$ARM_RUNNER"
           # GHCR requires a lowercase image name.
           echo "image=${REGISTRY}/${OWNER}/sp-fuseki"
         } >> "$GITHUB_OUTPUT"
         echo "jena legs: $MATRIX  (latest -> $DEF)"
   test:
     needs: plan
-    runs-on: ${{ matrix.arch == 'arm64' && fromJSON(needs.plan.outputs.arm_runner) || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
-        arch: ${{ fromJSON(needs.plan.outputs.arches) }}
+        arch:
+        - amd64
+        - arm64
     steps:
     - uses: actions/checkout@v4
     - uses: docker/setup-buildx-action@v3
@@ -110,12 +85,14 @@ jobs:
     - plan
     - test
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ matrix.arch == 'arm64' && fromJSON(needs.plan.outputs.arm_runner) || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
-        arch: ${{ fromJSON(needs.plan.outputs.arches) }}
+        arch:
+        - amd64
+        - arm64
     permissions:
       contents: read
       packages: write

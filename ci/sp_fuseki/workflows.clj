@@ -41,37 +41,28 @@
 
 (def hosted "ubuntu-latest")
 
-;; The self-hosted Apple Silicon box, addressed by LABELS. `the self-hosted runner` is the
-;; runner's *name*, and a name is not a label — targeting it queued two jobs
-;; forever with runner= empty. Labels are the only thing the scheduler matches.
-(def mac-arm64 ["self-hosted" "macOS" "ARM64"])
+(def hosted-arm
+  "GitHub's free arm64 runner. Public repositories only — the label does not
+  resolve in a private one, and an unresolvable label HANGS rather than fails, so
+  this pins the repo to public as surely as any setting does."
+  "ubuntu-24.04-arm")
 
 (def known-runners
   "Anything else is a typo, and a typo hangs rather than fails. Generation
   refuses instead."
-  #{hosted mac-arm64})
-
-(defn- json-array
-  "fromJSON() needs real JSON — double quotes, no trailing whitespace. Emitting
-  this as YAML flow style produced `[self-hosted, macOS, ARM64] `, which would
-  have failed at runtime; the semantic diff against the known-good file caught it."
-  [strs]
-  (str "[" (str/join ", " (map pr-str strs)) "]"))
-
-(def hosted-arm
-  "GitHub's free arm64 runner — public repositories ONLY. The label fails outright
-  in a private repo, which is why the choice below is made at runtime by `plan`
-  rather than pinned here: this repo is private today and public later, and the
-  same workflow has to work across the flip without a red window."
-  "ubuntu-24.04-arm")
+  #{hosted hosted-arm})
 
 (defn runner-for
-  "amd64 on hosted; arm64 wherever `plan` says. Emitted as a ternary because
-  `runs-on` can't be a matrix lookup, and plan's value is JSON so it can be either
-  a bare label (public) or the self-hosted label set (private)."
+  "amd64 on hosted, arm64 on hosted-arm. A ternary because `runs-on` cannot be a
+  matrix lookup.
+
+  This used to be a JSON value computed at runtime by `plan`, because arm64 ran on
+  our own Apple Silicon box and the label set had to change with repo visibility
+  and fork status. Both legs are GitHub's now: no self-hosted runner means no
+  persistent state, no LAN, and nothing to fence a fork PR away from — the risk is
+  gone rather than managed, and the workflow is one expression shorter for it."
   [arch-expr]
-  (format "${{ %s == 'arm64' && fromJSON(needs.plan.outputs.arm_runner) || '%s' }}"
-          arch-expr hosted))
+  (format "${{ %s == 'arm64' && '%s' || '%s' }}" arch-expr hosted-arm hosted))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared expressions
@@ -92,9 +83,11 @@
   (str not-pr " || github.event.pull_request.head.repo.full_name == github.repository"))
 
 (def jena-matrix "${{ fromJSON(needs.plan.outputs.matrix) }}")
-;; Not a literal list: plan drops arm64 for fork PRs so the job is never
-;; scheduled onto the self-hosted machine.
-(def arches-matrix "${{ fromJSON(needs.plan.outputs.arches) }}")
+(def arches-matrix
+  "Both arches, always. This was a `plan` output while arm64 ran on our own
+  hardware and a fork PR had to be dropped to amd64 only; with both legs on
+  GitHub's runners there is nothing left to decide at runtime."
+  ["amd64" "arm64"])
 (def image "${{ needs.plan.outputs.image }}")
 
 (defn cache-scope [] "type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}")
@@ -109,11 +102,6 @@
      ;; pin. The pin is Renovate-managed and is the leg that gets `latest`, so
      ;; there is one source of truth for "what is current".
      ;;
-     ;; SAME_REPO decides whether the self-hosted arm64 leg exists at all. It's
-     ;; computed HERE, on a hosted runner, because a job-level `if:` cannot see
-     ;; the matrix context — and even if it could, `runs-on` is resolved before
-     ;; steps run, so a skipped-step job would still be scheduled onto the Mac.
-     ;; Removing the arch from the list is the only way the job never exists.
      ;; EXTRA_JENA is EMPTY on purpose. It held 6.1.0 until the CVE gate found two
      ;; HIGH findings WITH fixes available in that image's bundled jars —
      ;; shiro-core 2.1.0 (CVE-2026-49268, LDAP injection into a DN) and
@@ -124,15 +112,9 @@
      ;;
      ;; The mechanism stays: add a version here to publish it alongside the
      ;; Dockerfile's pin, and the gate will tell you if it's patchable.
-     :env (m :EXTRA_JENA ""
-             :SAME_REPO (str "${{ " same-repo-or-push " }}")
-             ;; Enforced rather than remembered: the settings that keep forks off
-             ;; the Mac are checkboxes, and this is code.
-             :IS_PUBLIC "${{ github.event.repository.private == false }}")
+     :env (m :EXTRA_JENA "")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
-                 :arches "${{ steps.p.outputs.arches }}"
-                 :arm_runner "${{ steps.p.outputs.arm_runner }}"
                  :image "${{ steps.p.outputs.image }}")
      :steps [(m :uses "actions/checkout@v4")
              (m :id "p"
@@ -143,32 +125,9 @@
                           "# shellcheck disable=SC2086\n"
                           "MATRIX=\"$(printf '%s\\n' $EXTRA_JENA \"$DEF\" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)\"\n"
                           "OWNER=\"$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')\"\n"
-                          "# A self-hosted runner executes whatever the workflow says, on a real\n"
-                          "# machine with persistent state and LAN access. Fork PRs get hosted\n"
-                          "# amd64 only — still tested, just not on our hardware.\n"
-                          "# PUBLIC: arm64 goes to GitHub's free hosted arm runner, so the\n"
-                          "# self-hosted Mac is never scheduled and the risk disappears rather\n"
-                          "# than being fenced. Fork PRs are then safe on arm64 too — a hosted\n"
-                          "# VM is disposable.\n"
-                          "# PRIVATE: that label does not exist, so arm64 stays on the Mac and\n"
-                          "# fork PRs get amd64 only.\n"
-                          "if [ \"$IS_PUBLIC\" = \"true\" ]; then\n"
-                          "  ARM_RUNNER='\"ubuntu-24.04-arm\"'\n"
-                          "  ARCHES='[\"amd64\", \"arm64\"]'\n"
-                          "elif [ \"$SAME_REPO\" = \"true\" ]; then\n"
-                          "  ARM_RUNNER='[\"self-hosted\", \"macOS\", \"ARM64\"]'\n"
-                          "  ARCHES='[\"amd64\", \"arm64\"]'\n"
-                          "else\n"
-                          "  ARM_RUNNER='[\"self-hosted\", \"macOS\", \"ARM64\"]'\n"
-                          "  ARCHES='[\"amd64\"]'\n"
-                          "  echo \"fork PR on a private repo: omitting the self-hosted arm64 leg\"\n"
-                          "fi\n"
-                          "echo \"arm64 runner: $ARM_RUNNER\"\n"
                           "{\n"
                           "  echo \"default=$DEF\"\n"
                           "  echo \"matrix=$MATRIX\"\n"
-                          "  echo \"arches=$ARCHES\"\n"
-                          "  echo \"arm_runner=$ARM_RUNNER\"\n"
                           "  # GHCR requires a lowercase image name.\n"
                           "  echo \"image=${REGISTRY}/${OWNER}/sp-fuseki\"\n"
                           "} >> \"$GITHUB_OUTPUT\"\n"
@@ -178,12 +137,10 @@
   ;; Each arch built and tested by a runner of that arch. Before this, arm64 was
   ;; only ever an emulated leg of a publish — never tested at all.
   ;;
-  ;; SECURITY: the arm64 leg is gated to same-repo events. A self-hosted runner
-  ;; executes whatever the workflow says, on a real machine with persistent state
-  ;; and LAN access — so a fork PR must never land on it. amd64 still runs for
-  ;; forks, on disposable hosted VMs, so outside contributions are still tested.
-  ;; This matters most if the repo goes public; GitHub's own guidance is not to
-  ;; use self-hosted runners with public repos at all.
+  ;; Both legs run for every event, fork PRs included: they are GitHub-hosted
+  ;; VMs, disposable and holding nothing, so there is nothing an untrusted
+  ;; workflow could reach. Publishing is still gated to same-repo events — that
+  ;; job carries a package-write token, which is worth guarding.
   (m :needs "plan"
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
@@ -289,9 +246,9 @@
                          :path "/tmp/digests/*"
                          :retention-days 1
                          :if-no-files-found "error"))
-             ;; RUNNER_TEMP is cleaned between jobs, but a self-hosted machine is
-             ;; not a fresh VM and a cancelled job may not get that far. The token
-             ;; expires with the job; the file shouldn't outlive it either.
+             ;; RUNNER_TEMP is cleaned between jobs, but a cancelled job may not
+             ;; get that far. The token expires with the job; the file should not
+             ;; outlive it either.
              (m :name "Remove the credential file"
                 :if "always()"
                 :run (str "set -euo pipefail\n"

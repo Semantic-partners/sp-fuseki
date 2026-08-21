@@ -80,53 +80,34 @@
       (is (some? s) (str "no step matching " needle))
       (is (str/includes? (:if s) w/not-pr) (str desc " should be gated to non-PR events")))))
 
-(deftest fork-prs-never-reach-the-self-hosted-runner
-  ;; The one that matters if this repo goes public. A self-hosted runner executes
-  ;; whatever the workflow says, on a real machine with persistent state and LAN
-  ;; access, so a fork PR must never land there. amd64 still runs for forks on
-  ;; disposable hosted VMs, so outside contributions are still tested.
+(deftest no-job-can-land-on-a-self-hosted-runner
+  ;; The property that replaced a whole routing mechanism. arm64 used to run on our
+  ;; own Apple Silicon box, which meant the workflow had to know whether the repo
+  ;; was public and whether the PR came from a fork, and drop the arm64 leg when it
+  ;; could not be trusted — enforced by omitting the arch, because `runs-on`
+  ;; resolves before steps run and a job with every step skipped is still scheduled
+  ;; onto the machine.
   ;;
-  ;; Enforced by OMITTING the arch, not by a job-level `if`: `runs-on` resolves
-  ;; before steps run, so a job whose steps are all skipped is still scheduled
-  ;; onto the machine. (And job-level `if` can't see `matrix` anyway.)
-  (testing "the arch list is computed, not hardcoded"
-    (doseq [id [:test :publish]]
-      (is (= w/arches-matrix (get-in (job id) [:strategy :matrix :arch]))
-          (str id " must take its arch list from plan"))))
-  (testing "plan decides it from whether the event is same-repo"
-    (is (str/includes? (get-in (job :plan) [:env :SAME_REPO]) "head.repo.full_name == github.repository"))
-    (let [script (:run (second (:steps (job :plan))))]
-      (is (str/includes? script "SAME_REPO"))
-      (is (str/includes? script "[\"amd64\"]") "fork PRs get amd64 only")
-      (is (str/includes? script "arches=") "and it must be exported for the matrices")))
-  (testing "publish never runs for a fork at all"
+  ;; None of that exists now. Both legs are GitHub's, so a fork PR gets a
+  ;; disposable VM like everyone else, and the thing being guarded is simply gone.
+  ;; This test is what stops it coming back by accident.
+  (doseq [id [:plan :test :publish :merge]]
+    (let [ro (str (:runs-on (job id)))]
+      (is (not (str/includes? ro "self-hosted"))
+          (str id ": a self-hosted runner would hand a fork PR a real machine"))))
+  (testing "and nothing in the rendered YAML mentions one, including inside shell"
+    ;; Against the rendered text, not the job maps: a label that only ever appeared
+    ;; in a `run:` heredoc would pass the check above and still schedule a job.
+    (is (not (str/includes? (w/->yaml wf) "self-hosted"))))
+  (testing "publish still never runs for a fork — it holds a package-write token"
     (is (str/includes? (:if (job :publish)) "head.repo.full_name == github.repository"))))
 
-(deftest a-public-repo-routes-arm64-to-hosted-runners
-  ;; Issue #9 asked how to keep fork PRs off the self-hosted Mac once this repo is
-  ;; public. Routing beats fencing: on a public repo arm64 goes to GitHub's free
-  ;; `ubuntu-24.04-arm`, so the Mac is never scheduled and the risk is gone rather
-  ;; than guarded. The earlier version hard-failed the build instead, which would
-  ;; have put main red in the window between flipping public and switching runners.
-  ;;
-  ;; It has to be decided at RUNTIME, not pinned: `ubuntu-24.04-arm` does not work
-  ;; in a private repo (the workflow fails outright), and this repo is private now
-  ;; and public later. One workflow must be correct on both sides of that.
-  (let [script (:run (second (:steps (job :plan))))]
-    (is (str/includes? (get-in (job :plan) [:env :IS_PUBLIC]) "repository.private == false")
-        "plan must know whether the repo is public")
-    (is (str/includes? script "ubuntu-24.04-arm")
-        "public routes arm64 to the free hosted arm runner")
-    (is (str/includes? script "arm_runner=")
-        "and exports it for the jobs")
-    (testing "private keeps the self-hosted labels, since the hosted label would fail"
-      (is (str/includes? script "[\"self-hosted\", \"macOS\", \"ARM64\"]")))
-    (testing "fork PRs lose arm64 only while private — on a public repo it is a disposable VM"
-      (is (str/includes? script "fork PR on a private repo"))))
-  (testing "the jobs take the runner from plan rather than hardcoding it"
-    (doseq [id [:test :publish]]
-      (is (str/includes? (:runs-on (job id)) "fromJSON(needs.plan.outputs.arm_runner)")
-          (str id " must not pin the arm64 runner")))))
+(deftest both-arches-always-run
+  ;; The arch list was a `plan` output while it had to shrink for untrusted events.
+  ;; It is a constant now, and a constant is one fewer runtime value to get wrong.
+  (doseq [id [:test :publish]]
+    (is (= ["amd64" "arm64"] (get-in (job id) [:strategy :matrix :arch]))
+        (str id " must build and test both arches"))))
 
 (deftest cosign-is-installed-by-us-with-verification
   ;; sigstore/cosign-installer single-shots a GitHub release download, which
@@ -213,27 +194,12 @@
 ;; Runner targeting. A wrong label HANGS, it doesn't fail — so assert it.
 ;; ---------------------------------------------------------------------------
 
-(deftest arm64-runs-on-the-self-hosted-mac-amd64-on-hosted
+(deftest arm64-runs-on-the-hosted-arm-runner-amd64-on-the-hosted-one
   (doseq [id [:test :publish]]
     (let [ro (:runs-on (job id))]
       (is (str/includes? ro "matrix.arch == 'arm64'"))
-      (is (str/includes? ro w/hosted) "amd64 must fall back to the hosted runner")
-      (testing "labels, not the runner's name — a name matches nothing"
-        (is (not (str/includes? ro "the self-hosted runner")))))))
-
-(deftest every-runner-value-plan-emits-is-valid-json
-  ;; fromJSON parses JSON, not YAML. This used to check a literal array in
-  ;; `runs-on`; the value now comes from plan at runtime, so the check follows it
-  ;; there. A malformed value here fails every arm64 job at scheduling time.
-  (let [script (:run (second (:steps (job :plan))))
-        vals   (map second (re-seq #"ARM_RUNNER='([^']+)'" script))]
-    (is (= 3 (count vals)) "public, same-repo private, and fork-PR private")
-    (doseq [v vals]
-      (is (some? (json/parse-string v)) (str "not valid JSON: " v)))
-    (testing "the public branch is the free hosted arm runner"
-      (is (some #{"ubuntu-24.04-arm"} (map json/parse-string vals))))
-    (testing "the private branches are exactly the known self-hosted label set"
-      (is (some #(= w/mac-arm64 %) (map json/parse-string vals))))))
+      (is (str/includes? ro w/hosted-arm) "arm64 must name GitHub's arm runner")
+      (is (str/includes? ro w/hosted) "amd64 must fall back to the hosted runner"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Structure we rely on elsewhere
@@ -288,9 +254,11 @@
     (is (str/includes? msg "invalidates the whole workflow file"))))
 
 (deftest rejects-an-unknown-runner-label-set
-  ;; `the self-hosted runner` is a NAME. Requesting it queued jobs forever.
+  ;; A runner's NAME is not a label, and requesting one queued two jobs forever
+  ;; with `runner=` empty. Nothing fails; the run simply never starts, which is why
+  ;; generation refuses rather than trusting the string.
   (let [msg (refuses? {:jobs {:x {:runs-on (format "${{ matrix.a == 'b' && fromJSON('%s') || '%s' }}"
-                                                   "[\"self-hosted\", \"the self-hosted runner\"]" w/hosted)
+                                                   "[\"self-hosted\", \"some-runner-name\"]" w/hosted)
                                   :strategy {:matrix {:a ["b"]}}}}})]
     (is (str/includes? msg "aren't a known runner"))
     (is (str/includes? msg "hangs"))))

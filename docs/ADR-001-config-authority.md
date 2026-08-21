@@ -54,9 +54,6 @@ And JSON-LD works *because* it invented no semantics. Its keywords — `@id`, `@
 `@list` — each name an existing RDF construct. That is the discipline decision 0 imposes,
 and it is why the constraint below is the load-bearing part rather than the framing.
 
-It is also precisely the position of a downstream tool: EDN queries that compile to SPARQL. Not a rival
-query language, the same one in a better notation.
-
 The framing is not decoration; it is a **constraint on the schema**:
 
 - **Every key must denote something in the assembler vocabulary.** If a key has no
@@ -371,8 +368,9 @@ or waved through.
 
 ## Gaps this exposed in the EDN — all three now closed
 
-Recorded so the work was scoped from a real config rather than a hypothetical. A downstream tool's
-chinook config could not be expressed in EDN because of three things. **All three shipped,
+Recorded so the work was scoped from a real config rather than a hypothetical. The
+four-dataset config of the first migration onto this image could not be expressed in EDN
+because of three things. **All three shipped,
 and the full four-dataset config now expresses** — verified against the published image with
 41,174 real triples loaded (see below).
 
@@ -380,9 +378,10 @@ and the full four-dataset config now expresses** — verified against the publis
    whose TTL is an RDF list of blank nodes, and therefore the one with the largest ergonomic
    payoff. See "What `:text` actually cost" in 5b for the two things it taught.
 2. **No unnamed endpoints.** `endpoint-lines` only ever emits named ones, so an EDN dataset
-   does not answer at its root. Confirmed: `/kb/sparql` → 200, `/kb` → 400. A downstream tool needs root
-   operations because a bulk loader targets the dataset URL directly — and so does the ES
-   plugin's own config, via `fuseki:serviceQuery "sparql", "query", ""`.
+   does not answer at its root. Confirmed: `/kb/sparql` → 200, `/kb` → 400. Root operations
+   are needed by any client that targets the dataset URL rather than a named endpoint — a
+   bulk loader POSTing to `/kb`, and a plugin whose config says
+   `fuseki:serviceQuery "sparql", "query", ""`.
 3. **No control over endpoint names, and the default is a live surprise.** `:query` renders
    as `fuseki:name "sparql"` (`render.clj:56`), so `/ds/query` is a 404. This one bites
    silently and is independent of any extension work.

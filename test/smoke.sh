@@ -56,8 +56,8 @@ elif [ "$(uname -s)" = "Linux" ]; then
 else
   # Deliberately NOT extracting on macOS: the image's bb is an ELF binary and
   # would fail with "cannot execute binary file" — which is exactly what the first
-  # version of this wrapper did on a Mac. The self-hosted arm64 runner is macOS, so
-  # bb is a prerequisite there alongside Docker.
+  # version of this wrapper did on a Mac. CI is Linux on both arches, so this
+  # branch is for local runs: bb is a prerequisite here alongside Docker.
   echo "FAIL: bb is required on $(uname -s) and is not on PATH." >&2
   echo "  brew install borkdude/brew/babashka" >&2
   echo "  (the copy inside ${IMAGE} is a Linux binary and cannot run here)" >&2

@@ -622,9 +622,9 @@ Actions YAML is a programming language with no compiler and, worse, nothing to
 test. Generating it from data means the CI definition gets the same treatment as
 everything else here — [test/workflows_test.clj](test/workflows_test.clj) asserts
 that `latest` is only applied to the default Jena leg on `main`, that publishing
-is never enabled for fork PRs, that arm64 jobs target the self-hosted labels
-(a runner's *name* is not a label, and a wrong label **hangs** rather than
-failing), and that `fromJSON` gets valid JSON. The generator refuses to emit a
+is never enabled for fork PRs, and that no job can be scheduled onto a
+self-hosted runner (both arches are GitHub's — and a wrong runner label **hangs**
+rather than failing, so it is asserted rather than eyeballed). The generator refuses to emit a
 workflow that uses an unavailable expression context, references an undeclared
 matrix key, needs a job that doesn't exist, or runs multi-command shell without
 `set -euo pipefail`.
