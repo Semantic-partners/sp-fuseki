@@ -42,9 +42,14 @@
 (def hosted "ubuntu-latest")
 
 (def hosted-arm
-  "GitHub's free arm64 runner. Public repositories only — the label does not
-  resolve in a private one, and an unresolvable label HANGS rather than fails, so
-  this pins the repo to public as surely as any setting does."
+  "GitHub's hosted arm64 runner. Free on public repositories, ordinary Actions
+  minutes on private ones — availability is not the constraint, billing is.
+
+  Corrected here rather than left as folklore: the earlier note in this file said
+  the label was public-only and would fail outright, and I made that worse by
+  claiming it would HANG. Neither is true. Run 32657188563 scheduled and completed
+  both arm64 legs on this repo while it was still private, and the timing API
+  reported 0s billable for the whole run."
   "ubuntu-24.04-arm")
 
 (def known-runners
