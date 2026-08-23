@@ -614,6 +614,27 @@
     (is (< (str/index-of r/shiro-anon "/$/server = anon")
            (str/index-of r/shiro-anon "/$/** = authcBasic")))))
 
+(deftest the-401-explains-itself-in-the-realm
+  ;; Feedback from someone meeting this cold: closed-by-default admin is right, and
+  ;; the generated shiro.ini explains itself at the place you would go looking — but
+  ;; only if you thought to look. The 401 itself was a dead end: BASIC auth against
+  ;; an empty [users], so no credential can ever work and nothing says why.
+  ;;
+  ;; Shiro echoes applicationName into WWW-Authenticate, which makes the realm the
+  ;; one field that reaches a caller who is holding a refusal and nothing else.
+  (testing "anon mode: the realm carries the reason and the fix"
+    (is (str/includes? r/shiro-anon "authcBasic.applicationName ="))
+    (let [realm (-> (re-find #"authcBasic\.applicationName = (.*)" r/shiro-anon) second)]
+      (is (str/includes? realm "CLOSED") "the reason")
+      (is (str/includes? realm "FUSEKI_AUTH=basic") "and the fix, spelled exactly as it is typed")
+      (testing "no double quote — the realm is a quoted-string in the header"
+        (is (not (str/includes? realm "\""))))))
+  (testing "basic mode names the image and nothing more"
+    ;; Here credentials DO exist, so a hint would be noise — and telling an
+    ;; unauthenticated caller how auth is configured is not the same favour.
+    (let [realm (-> (re-find #"authcBasic\.applicationName = (.*)" (r/shiro-basic "admin" "pw")) second)]
+      (is (= "sp-fuseki" realm)))))
+
 (deftest basic-shiro-keeps-ping-open-for-the-healthcheck
   (let [ini (r/shiro-basic "admin" "s3cret")]
     (testing "gating /$/ping makes every basic-auth container report unhealthy"

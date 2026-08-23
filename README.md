@@ -500,6 +500,16 @@ path. We resolve that as follows:
 | `FUSEKI_AUTH=anon` (default) | open | open | **401** — no credentials exist to satisfy, so admin is closed |
 | `FUSEKI_AUTH=basic` | login | login (`/$/ping` open for the healthcheck) | login |
 
+That 401 explains itself. There is no credential that can satisfy it, so the
+challenge carries the reason and the fix in its realm rather than leaving you to
+guess:
+
+```console
+$ curl -i -X POST http://localhost:3030/\$/datasets
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: BASIC realm="sp-fuseki admin is CLOSED in anon mode - no credentials exist. Set FUSEKI_AUTH=basic to open it."
+```
+
 So the default image is a usable lab server whose datasets a passer-by **cannot
 drop**, and the UI still shows server info and dataset lists. If you want the
 UI's dataset-management pages to work, run `FUSEKI_AUTH=basic` and log in. Both

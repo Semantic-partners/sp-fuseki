@@ -588,8 +588,17 @@
 # closed. Set auth mode :basic (FUSEKI_AUTH=basic) to actually use the admin API.
 #
 # Read-only admin stays open so the UI (and your monitoring) still reports.
+#
+# The realm below is the 401's only chance to explain itself. A bare
+# WWW-Authenticate BASIC realm of `application` against an empty [users] is a dead
+# end — there are no credentials that work, and nothing says so. Shiro echoes
+# applicationName into that header, so the reason and the fix arrive with the
+# refusal instead of waiting in this file for someone who thought to look.
+#
+# (This is a Clojure string literal: no double quotes below, or the def ends here.)
 [main]
 ssl.enabled = false
+authcBasic.applicationName = sp-fuseki admin is CLOSED in anon mode - no credentials exist. Set FUSEKI_AUTH=basic to open it.
 [users]
 [roles]
 [urls]
@@ -612,6 +621,7 @@ ssl.enabled = false
 # unhealthy forever. Ping returns a timestamp and nothing else.
 [main]
 ssl.enabled = false
+authcBasic.applicationName = sp-fuseki
 [users]
 %s = %s
 [roles]

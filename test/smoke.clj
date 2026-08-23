@@ -812,6 +812,35 @@
       (is (not (str/includes? out "exec: java")) "and Fuseki did not start"))))
 
 ;; ---------------------------------------------------------------------------
+;; 39. the refusal explains itself
+;; ---------------------------------------------------------------------------
+
+(deftest s39-the-anon-401-carries-its-own-explanation
+  ;; s06 asserts admin is fenced. This asserts the fence is legible from outside:
+  ;; a caller who gets the 401 and never opens shiro.ini still learns why and what
+  ;; to change. Reported by someone meeting the image cold — the file explained
+  ;; itself perfectly, and the 401 explained nothing.
+  (with-container [cid {}]
+    (wait-ping)
+    (let [{:keys [status headers]} (GET (str base "/$/datasets"))
+          realm (get headers "www-authenticate")]
+      (is (= 401 status) "admin is still closed — the hint must not have opened anything")
+      (is (some? realm) "and it is still a BASIC challenge")
+      (is (str/includes? realm "CLOSED") "the realm says the admin API is closed")
+      (is (str/includes? realm "FUSEKI_AUTH=basic")
+          "and names the variable to set, exactly as it is typed")))
+  (testing "while basic mode, where credentials do exist, keeps a plain realm"
+    (with-container [cid {:env {"FUSEKI_AUTH" "basic" "FUSEKI_ADMIN_PASSWORD" "s3cret"}}]
+      (wait-ping)
+      (let [realm (get (:headers (GET (str base "/$/datasets"))) "www-authenticate")]
+        (is (str/includes? realm "sp-fuseki"))
+        (is (not (str/includes? realm "CLOSED"))
+            "an unauthenticated caller does not need the auth configuration read out"))
+      (is (= 200 (:status (GET (str base "/$/datasets")
+                               {:basic-auth ["admin" "s3cret"]})))
+          "and the credentials still work — the realm is a label, not a gate"))))
+
+;; ---------------------------------------------------------------------------
 
 (defn -main [& _]
   (println (str "== sp-fuseki smoke: " image " =="))
