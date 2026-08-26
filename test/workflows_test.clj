@@ -38,6 +38,27 @@
 ;; Tag rules. Getting these wrong publishes a wrong `latest` — silently.
 ;; ---------------------------------------------------------------------------
 
+(deftest the-build-axis-is-calver-plus-the-commit
+  ;; `6.2.0-2026.08.26-06f7922`. Jena's version leads because that is what anyone
+  ;; is choosing; the suffix answers two other questions — how stale, and built
+  ;; from what. It replaced `github.run_number`, which answered neither: a counter
+  ;; that advances for runs which changed nothing.
+  (let [script (:run (second (:steps (job :plan))))]
+    (testing "computed once in plan, so every Jena leg of one run agrees"
+      (is (str/includes? script "BUILD=") "plan must compute it")
+      (is (str/includes? script "echo \"build=$BUILD\"") "and export it")
+      (is (= "${{ steps.p.outputs.build }}" (get-in (job :plan) [:outputs :build]))))
+    (testing "UTC — a local-time stamp is ambiguous twice a year"
+      (is (str/includes? script "date -u")))
+    (testing "date then sha, so the tag sorts by day and names its tree"
+      (is (str/includes? script "+%Y.%m.%d"))
+      (is (str/includes? script "${GITHUB_SHA::7}")))
+    (testing "and no counter anywhere in the tags"
+      (is (not (str/includes? (tags) "run_number")))))
+  (testing "the jena version leads the tag, not the date"
+    (is (str/includes? (tag-line "needs.plan.outputs.build")
+                       "value=${{ matrix.jena }}-"))))
+
 (deftest latest-only-for-the-default-leg-on-main
   (let [line (tag-line "value=latest")]
     (is (some? line))
@@ -47,7 +68,7 @@
       (is (str/includes? line "github.event_name != 'pull_request'")))))
 
 (deftest release-tags-never-published-from-a-pr
-  (doseq [t ["value=${{ matrix.jena }}-${{ github.run_number }}" "value=${{ matrix.jena }},"]]
+  (doseq [t ["value=${{ matrix.jena }}-${{ needs.plan.outputs.build }}" "value=${{ matrix.jena }},"]]
     (let [line (tag-line t)]
       (is (some? line) (str "missing tag rule: " t))
       (is (str/includes? line "enable=${{ github.event_name != 'pull_request' }}")

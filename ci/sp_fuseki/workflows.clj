@@ -120,6 +120,7 @@
      :env (m :EXTRA_JENA "")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
+                 :build "${{ steps.p.outputs.build }}"
                  :image "${{ steps.p.outputs.image }}")
      :steps [(m :uses "actions/checkout@v4")
              (m :id "p"
@@ -130,9 +131,16 @@
                           "# shellcheck disable=SC2086\n"
                           "MATRIX=\"$(printf '%s\\n' $EXTRA_JENA \"$DEF\" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)\"\n"
                           "OWNER=\"$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')\"\n"
+                          "# CalVer plus the commit, computed ONCE so every Jena leg of a run agrees.\n"
+                          "# UTC: a stamp in local time is ambiguous twice a year and wrong to anyone\n"
+                          "# reading it from another zone. The sha makes the tag traceable to a tree,\n"
+                          "# and means a re-run of one commit produces the same tag rather than a\n"
+                          "# second name for identical bytes.\n"
+                          "BUILD=\"$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}\"\n"
                           "{\n"
                           "  echo \"default=$DEF\"\n"
                           "  echo \"matrix=$MATRIX\"\n"
+                          "  echo \"build=$BUILD\"\n"
                           "  # GHCR requires a lowercase image name.\n"
                           "  echo \"image=${REGISTRY}/${OWNER}/sp-fuseki\"\n"
                           "} >> \"$GITHUB_OUTPUT\"\n"
@@ -263,8 +271,19 @@
   ;; Release tags only off-PR; `latest` only for the default leg on main; a
   ;; disposable pr-<n> tag so a PR can exercise create/inspect/platform-assert
   ;; without touching a tag anyone consumes.
+  ;;
+  ;; The build axis is CalVer plus the commit — `6.2.0-2026.08.26-06f7922`. Jena's
+  ;; version leads, because that is the thing anyone is actually choosing; ours is
+  ;; a suffix answering two different questions. The date answers "how stale is
+  ;; this image", which is the only question a rebuild of the SAME Jena raises: it
+  ;; happens because a base layer or a CVE moved, not because we shipped a feature.
+  ;; The sha answers "built from what", and makes a re-run of one commit produce
+  ;; the same tag instead of a second name for identical bytes.
+  ;;
+  ;; It was `github.run_number` before, which is neither: a counter that advances
+  ;; for runs that changed nothing and tells you nothing without a lookup.
   (str/join "\n"
-            [(str "type=raw,value=${{ matrix.jena }}-${{ github.run_number }},enable=${{ " not-pr " }}")
+            [(str "type=raw,value=${{ matrix.jena }}-${{ needs.plan.outputs.build }},enable=${{ " not-pr " }}")
              (str "type=raw,value=${{ matrix.jena }},enable=${{ " not-pr " }}")
              (str "type=raw,value=latest,enable=${{ " not-pr
                   " && matrix.jena == needs.plan.outputs.default"

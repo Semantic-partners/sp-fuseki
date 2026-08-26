@@ -30,6 +30,7 @@ jobs:
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
+      build: ${{ steps.p.outputs.build }}
       image: ${{ steps.p.outputs.image }}
     steps:
     - uses: actions/checkout@v4
@@ -42,9 +43,16 @@ jobs:
         # shellcheck disable=SC2086
         MATRIX="$(printf '%s\n' $EXTRA_JENA "$DEF" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)"
         OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+        # CalVer plus the commit, computed ONCE so every Jena leg of a run agrees.
+        # UTC: a stamp in local time is ambiguous twice a year and wrong to anyone
+        # reading it from another zone. The sha makes the tag traceable to a tree,
+        # and means a re-run of one commit produces the same tag rather than a
+        # second name for identical bytes.
+        BUILD="$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}"
         {
           echo "default=$DEF"
           echo "matrix=$MATRIX"
+          echo "build=$BUILD"
           # GHCR requires a lowercase image name.
           echo "image=${REGISTRY}/${OWNER}/sp-fuseki"
         } >> "$GITHUB_OUTPUT"
@@ -201,7 +209,7 @@ jobs:
       with:
         images: ${{ needs.plan.outputs.image }}
         tags: |
-          type=raw,value=${{ matrix.jena }}-${{ github.run_number }},enable=${{ github.event_name != 'pull_request' }}
+          type=raw,value=${{ matrix.jena }}-${{ needs.plan.outputs.build }},enable=${{ github.event_name != 'pull_request' }}
           type=raw,value=${{ matrix.jena }},enable=${{ github.event_name != 'pull_request' }}
           type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && matrix.jena == needs.plan.outputs.default && github.ref == 'refs/heads/main' }}
           type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }},enable=${{ github.event_name == 'pull_request' }}

@@ -660,7 +660,9 @@ test Jena's correctness; that's Apache's job.
 
 CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds a **matrix
 of Jena versions** multi-arch, smoke-tests each, pushes to GHCR with two-axis tags
-(`<jena>-<sp-build>`, `<jena>`, and `latest` on the default leg only), generates an
+(`<jena>-<YYYY.MM.DD>-<sha>`, `<jena>`, and `latest` on the default leg only — the
+Jena version leads because it is the thing you are choosing, and the suffix says
+how stale the rebuild is and which commit built it), generates an
 SBOM, scans (Trivy — see *Vulnerability posture* above for what that blocks and
 what it merely reports), and signs (cosign keyless). The default leg is whatever
 `image/Dockerfile` pins; additional older versions can be published alongside it by
