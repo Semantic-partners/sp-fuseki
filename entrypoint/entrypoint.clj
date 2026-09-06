@@ -97,6 +97,40 @@
 ;; no second image, no extra build leg.
 (def plain-main "org.apache.jena.fuseki.main.cmds.FusekiServerPlainCmd")
 
+;; The UI build's class, which the jar's manifest names as its Main-Class. It has
+;; to be spelled out for the same reason `extra` below needs it: `java -jar`
+;; IGNORES `-cp`, so the moment a classpath has more than the one jar on it, both
+;; postures have to be launched by class and neither can use `-jar`.
+(def ui-main "org.apache.jena.fuseki.main.cmds.FusekiServerCmd")
+
+;; Extra jars — the mechanism the dist's own `fuseki-server` script calls "the
+;; recommended way to add custom code", and which this entrypoint dropped by
+;; replacing that script:
+;;
+;;   CP=$JAR
+;;   if [ -d "$FUSEKI_BASE/extra" ] ; then CP="${CP}:${FUSEKI_BASE}/extra/*" ; fi
+;;
+;; Without it a custom Graph, assembler, ARQ function or FusekiModule cannot be
+;; loaded at all — and the TTL passthrough ADR-001 points those at can only NAME
+;; a class, never put it on the classpath. So the escape hatch led somewhere with
+;; no floor.
+;;
+;; A DIRECTORY and not a list of jars, matching upstream, so a config that works
+;; against stock Fuseki works here unchanged.
+(defn extra-dir
+  "The extra jar directory if it exists and holds anything, else nil — absent and
+  empty are the same answer to \"is there a classpath to extend\"."
+  [base]
+  (let [d (fs/file base "extra")]
+    (when (and (fs/directory? d) (seq (filter #(str/ends-with? (str %) ".jar") (fs/list-dir d))))
+      (str d))))
+
+(defn classpath
+  "`jar`, plus every jar in `extra`. `dir/*` is the JVM's own wildcard and is
+  expanded by the launcher, not the shell — so it survives `exec` with no glob."
+  [jar extra]
+  (if extra (str jar ":" extra "/*") jar))
+
 (defn default-edn
   "The zero-config default, as data. Rendered by the same code as a user's EDN."
   []
@@ -467,9 +501,19 @@
                              (str (name op) " " (str/join " " paths))))))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (log "effective port   ->" eff-port (str "(" port ")"))
-    (let [launch (case ui
-                   "on"  ["java" "-jar" jar]
-                   "off" ["java" "-cp" jar plain-main]
+    (let [extra (extra-dir base)
+          cp    (classpath jar extra)
+          _     (when extra
+                  (log "extra jars      ->" extra
+                       (str "(" (count (filter #(str/ends-with? (str %) ".jar")
+                                               (fs/list-dir extra))) " on the classpath)")))
+          ;; BOTH postures go through `-cp`, always — not only when `extra` is
+          ;; present. One launch shape means the UI leg cannot quietly keep the
+          ;; old behaviour while the headless one gets the fix, which is exactly
+          ;; how a one-line version of this patch would have gone wrong.
+          launch (case ui
+                   "on"  ["java" "-cp" cp ui-main]
+                   "off" ["java" "-cp" cp plain-main]
                    (die "ui must be 'on' or 'off', got:" ui))
           ;; ONE vector, logged and executed. `log` is println with varargs, so
           ;; the previous line printed "--port= 3030  --config= ..." — an argv you

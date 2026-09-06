@@ -200,6 +200,12 @@
 (def sample-ttl (str here "/sample.ttl"))
 (def inference-ttl (str here "/inference.ttl"))
 (def config-ttl (str repo "/examples/config.ttl"))
+;; A config naming a class that is NOT in the Fuseki jar, and the jar holding it.
+;; Against stock Fuseki this works because `fuseki-server` puts $FUSEKI_BASE/extra/*
+;; on the classpath; without that the server does not merely miss the class, it
+;; fails to boot.
+(def extra-class-ttl (str here "/extra-class.ttl"))
+(def extra-jars      (str here "/fixtures/extra"))
 (def config-tdb2 (str repo "/examples/config-tdb2.ttl"))
 (def example-edn (str repo "/examples/fuseki.edn"))
 
@@ -841,6 +847,33 @@
           "and the credentials still work — the realm is a label, not a gate"))))
 
 ;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Extra jars — the mechanism the dist's own `fuseki-server` script calls "the
+;; recommended way to add custom code", and which an entrypoint that replaces
+;; that script has to carry itself.
+;; ---------------------------------------------------------------------------
+
+(deftest s40-extra-jars-reach-the-classpath
+  (doseq [ui ["on" "off"]]
+    (testing (str "FUSEKI_UI=" ui)
+      (with-container [cid {:env {"FUSEKI_UI" ui}
+                            :mounts [(str extra-class-ttl ":/fuseki/config.ttl:ro")
+                                     (str extra-jars ":/fuseki/run/extra:ro")]}]
+        (wait-ping)
+        ;; The server booting AT ALL is the assertion: `ja:loadClass` on a class
+        ;; the Fuseki jar does not contain aborts startup when the classpath is
+        ;; only that jar. Both postures, because `java -jar` ignores `-cp` — a fix
+        ;; applied to the headless leg alone would leave the DEFAULT one broken.
+        (is (= 200 (status (str base "/$/ping")))
+            "server started with a config naming a class from FUSEKI_BASE/extra")
+        (is (ask (str base "/ds/sparql") "ASK {}")
+            "and answers queries")
+        ;; The entrypoint logs to stderr, so both streams — every other decision
+        ;; it reports is read the same way.
+        (let [{o :out e :err} (docker "logs" cid)]
+          (is (str/includes? (str o e) "extra jars")
+              "the extra directory is reported at boot, like every other decision"))))))
 
 (defn -main [& _]
   (println (str "== sp-fuseki smoke: " image " =="))

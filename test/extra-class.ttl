@@ -1,0 +1,11 @@
+PREFIX ja:     <http://jena.hpl.hp.com/2005/11/Assembler#>
+PREFIX fuseki: <http://jena.apache.org/fuseki#>
+PREFIX rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+## The extension point under test: config naming a class that is not in the Fuseki jar.
+[] ja:loadClass "probe.ExtraProbe" .
+
+<#svc> rdf:type fuseki:Service ;
+    fuseki:name "ds" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query ; fuseki:name "sparql" ] ;
+    fuseki:dataset [ rdf:type ja:MemoryDataset ] .
