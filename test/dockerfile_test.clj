@@ -42,6 +42,39 @@
   ;; which is why the count assertion below exists.
   #"\$CURL[^;]*-o\s+(\S+\.tgz)")
 
+(deftest the-fuseki-mirror-is-chosen-then-verified
+  ;; A CI leg died with curl exit 28 fetching the 57MB dist: archive.apache.org
+  ;; serves it at ~150KB/s against a 300s retry budget, and two JRE legs pulling at
+  ;; once was enough to finish it off. The CDN is ~88x faster but carries only
+  ;; current releases, so both mirrors are listed and the order matters.
+  (testing "the CDN is tried first, with the permanent archive behind it"
+    (is (< (str/index-of dockerfile "dlcdn.apache.org")
+           (str/index-of dockerfile "archive.apache.org/dist/jena"))
+        "dlcdn must come first, or every build pays the slow mirror"))
+  (testing "and the archive is still there, because EXTRA_JENA legs exist only on it"
+    (is (str/includes? dockerfile "archive.apache.org/dist/jena")))
+  (testing "the mirror is selected with a HEAD that does NOT retry"
+    ;; $CURL carries --retry-all-errors, which retries a 404 eight times: probing a
+    ;; missing version with it cost 255 seconds to learn what HEAD answers instantly.
+    (is (str/includes? dockerfile "--head")
+        "selection must use a HEAD request")
+    (let [head-line (->> (str/split-lines dockerfile)
+                         (filter #(str/includes? % "--head"))
+                         first)]
+      (is (not (str/includes? head-line "retry-all-errors"))
+          "the probe must not inherit the retry-everything policy")))
+  (testing "no mirror serving it is fatal, not a build that continues"
+    (is (str/includes? dockerfile "FATAL: no mirror served")))
+  (testing "verification happens AFTER the mirror is chosen, so it covers whatever was served"
+    (let [fetched (str/index-of dockerfile "fetched from $FETCHED")
+          sha     (str/index-of dockerfile "sha512sum -c -")
+          sig     (str/index-of dockerfile "VALIDSIG ${JENA_SIGNING_FINGERPRINT}")]
+      (is (< fetched sha) "checksum after the fetch")
+      (is (< sha sig) "signature after the checksum")))
+  (testing "a stalled transfer is retried rather than left to burn the budget"
+    (is (str/includes? dockerfile "--speed-limit"))
+    (is (str/includes? dockerfile "--speed-time"))))
+
 (deftest every-downloaded-artifact-is-checksum-verified
   (let [blocks (filter #(re-find artifact-download %) (run-blocks dockerfile))]
     (testing "the artifacts are found at all (a rename must not silently pass)"
@@ -78,8 +111,8 @@
   ;; because it travels the same channel as the artifact. The signature is the
   ;; provenance claim — and it is worth nothing unless the SIGNER is pinned.
   (doseq [[label sig-file arg fatal]
-          [["Fuseki" "fuseki.asc" "JENA_KEY_FPR"    #"FATAL: Fuseki \.asc is not a valid signature"]
-           ["JRE"    "jre.sig"    "TEMURIN_KEY_FPR" #"FATAL: JRE \.sig is not a valid signature"]]]
+          [["Fuseki" "fuseki.asc" "JENA_SIGNING_FINGERPRINT"    #"FATAL: Fuseki \.asc is not a valid signature"]
+           ["JRE"    "jre.sig"    "TEMURIN_SIGNING_FINGERPRINT" #"FATAL: JRE \.sig is not a valid signature"]]]
     (testing label
       (let [block (first (filter #(str/includes? % sig-file) (run-blocks dockerfile)))]
         (is (some? block) (str label " must fetch its signature"))

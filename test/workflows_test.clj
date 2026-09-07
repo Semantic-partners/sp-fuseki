@@ -57,7 +57,45 @@
       (is (not (str/includes? (tags) "run_number")))))
   (testing "the jena version leads the tag, not the date"
     (is (str/includes? (tag-line "needs.plan.outputs.build")
-                       "value=${{ matrix.jena }}-"))))
+                       "value=${{ matrix.jena }}")
+        "the jena version leads, before the jre suffix and the build stamp")))
+
+(deftest the-jre-is-a-matrix-axis-with-its-own-tags
+  ;; A session needing Panama could not use this image at all: java.lang.foreign
+  ;; is preview in 21 and final in 22, so a jar compiled for release 22+ is
+  ;; refused on class file version by the 21 JVM the image pinned. The axis exists
+  ;; so that user pulls a tag instead of forking the Dockerfile.
+  (testing "plan reads the default from the Dockerfile and emits one object per leg"
+    (let [script (:run (second (:steps (job :plan))))]
+      (is (str/includes? script "ARG TEMURIN_VERSION=") "read from the Dockerfile, not duplicated in CI")
+      (is (str/includes? script "EXTRA_JRE") "extra legs come from a variable, like EXTRA_JENA")
+      (testing "as objects, because the tag needs the major and the build-arg the whole version"
+        (is (str/includes? script "version:"))
+        (is (str/includes? script "major:"))
+        (is (str/includes? script "default:")))))
+  (testing "every image-building job takes the axis"
+    (doseq [id [:test :publish :merge]]
+      (is (= w/jre-matrix (get-in (job id) [:strategy :matrix :jre]))
+          (str id " must build each JRE leg"))))
+  (testing "and passes the version to the build, not just to the tag"
+    (doseq [id [:test :publish]]
+      (is (str/includes? (get-in (step-named id "build-push-action") [:with :build-args])
+                         "TEMURIN_VERSION=${{ matrix.jre.version }}")
+          (str id " must pass TEMURIN_VERSION through"))))
+  (testing "the default leg keeps the tags it already publishes"
+    ;; If `6.2.0` gained a suffix, or a non-default leg could claim it, the meaning
+    ;; of an existing tag would depend on which leg finished last.
+    (doseq [l (str/split-lines (tags))
+            :when (and (not (str/blank? l)) (not (str/includes? l "value=latest")))]
+      (is (str/includes? l "matrix.jre.default && ''")
+          (str "tag must be suffixed on non-default JRE legs only: " l))))
+  (testing "latest requires the default JRE as well as the default Jena"
+    (is (str/includes? (tag-line "value=latest") "matrix.jre.default")))
+  (testing "caches and digest artifacts are per-JRE, or two legs would overwrite each other"
+    (is (str/includes? (get-in (step-named :publish "build-push-action") [:with :cache-to])
+                       "jre${{ matrix.jre.major }}"))
+    (is (str/includes? (get-in (step-named :publish "upload-artifact") [:with :name])
+                       "jre${{ matrix.jre.major }}"))))
 
 (deftest latest-only-for-the-default-leg-on-main
   (let [line (tag-line "value=latest")]
@@ -68,11 +106,20 @@
       (is (str/includes? line "github.event_name != 'pull_request'")))))
 
 (deftest release-tags-never-published-from-a-pr
-  (doseq [t ["value=${{ matrix.jena }}-${{ needs.plan.outputs.build }}" "value=${{ matrix.jena }},"]]
-    (let [line (tag-line t)]
-      (is (some? line) (str "missing tag rule: " t))
-      (is (str/includes? line "enable=${{ github.event_name != 'pull_request' }}")
-          (str t " must be disabled on PRs")))))
+  ;; A PR must never move a tag anyone consumes. Each release tag line carries its
+  ;; own enable= guard, so this checks every one of them rather than trusting that
+  ;; they were all written the same way.
+  (let [lines (->> (str/split-lines (tags))
+                   (remove str/blank?)
+                   (remove #(str/includes? % "value=pr-")))]
+    (is (= 3 (count lines)) "build-stamped, plain, and latest")
+    (doseq [l lines]
+      (is (str/includes? l "github.event_name != 'pull_request'")
+          (str "release tag not gated to non-PR events: " l))))
+  (testing "and the disposable PR tag is the only one enabled on a PR"
+    (let [pr (->> (str/split-lines (tags)) (filter #(str/includes? % "value=pr-")) first)]
+      (is (some? pr))
+      (is (str/includes? pr "github.event_name == 'pull_request'")))))
 
 (deftest prs-get-a-disposable-tag-only
   (let [line (tag-line "value=pr-")]

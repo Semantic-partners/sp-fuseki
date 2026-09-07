@@ -48,6 +48,7 @@
 (require '[babashka.fs :as fs]
          '[babashka.process :as p]
          '[clojure.string :as str]
+         '[sp-fuseki.launch :as launch]
          '[sp-fuseki.prestart :as prestart]
          '[sp-fuseki.render :as render])
 
@@ -90,12 +91,21 @@
 (def auth-default "anon")
 (def ui-default   "on")
 (def jar       (env "FUSEKI_JAR"        "/opt/fuseki/fuseki-server.jar"))
+(def fuseki-home (env "FUSEKI_HOME"    "/opt/fuseki"))
 
-;; The one jar carries both servers. Its manifest Main-Class is the UI + admin
-;; build (what `java -jar` gets you); this is the headless one, same class the
-;; dist's own `fuseki-plain` script selects. So FUSEKI_UI is a runtime choice —
-;; no second image, no extra build leg.
-(def plain-main "org.apache.jena.fuseki.main.cmds.FusekiServerPlainCmd")
+;; The dist script's knobs. Held raw, because the resolved value is logged with
+;; its source either way. JAVA_OPTIONS is the official container's name for
+;; JVM_ARGS; both are in the wild, so both are read.
+(def env-main         (System/getenv "MAIN"))
+(def env-jvm-args     (System/getenv "JVM_ARGS"))
+(def env-java-options (System/getenv "JAVA_OPTIONS"))
+(def env-logging      (System/getenv "LOGGING"))
+;; `JAVA` picks the binary, exactly as the script does.
+(def java-bin  (env "JAVA"             "java"))
+
+;; Extra jars, main class, JVM args and logging all live in sp_fuseki/launch.clj —
+;; pure decisions, unit-tested, with the dist's own `fuseki-server` script as the
+;; specification. See that namespace for why each one exists.
 
 (defn default-edn
   "The zero-config default, as data. Rendered by the same code as a user's EDN."
@@ -140,12 +150,21 @@
   #{"FUSEKI_BASE" "FUSEKI_CONFIG" "FUSEKI_EDN" "FUSEKI_SHIRO" "FUSEKI_PORT"
     "FUSEKI_DATASET" "FUSEKI_AUTH" "FUSEKI_UI" "FUSEKI_JAR" "FUSEKI_TDB2_ROOT"
     "FUSEKI_ADMIN_USER" "FUSEKI_ADMIN_PASSWORD" "FUSEKI_ADMIN_PASSWORD_FILE"
-    "FUSEKI_PRESTART"})
+    "FUSEKI_PRESTART" "FUSEKI_HOME"
+    ;; Not FUSEKI_-prefixed, so they never tripped the unrecognised-name warning —
+    ;; which is exactly how they went unnoticed while being dropped.
+    "MAIN" "JVM_ARGS" "JAVA_OPTIONS" "LOGGING" "JAVA"})
 
 (def ^:private inherited-from-elsewhere
   "Names Fuseki's own scripts and the base image set, which are not ours to
   explain. Reporting these would train people to ignore the whole line."
-  #{"FUSEKI_HOME" "JAVA_HOME" "JAVA_OPTS" "JVM_ARGS"})
+  #{"JAVA_HOME"})
+
+(def ^:private looks-like-heap
+  "Names people set expecting the JVM to pick them up, which neither the dist
+  script nor the official container reads. Worth a line each: someone who set
+  JAVA_OPTS and got the default heap cannot tell from the outside."
+  {"JAVA_OPTS" "JVM_ARGS (the dist's name) or JAVA_OPTIONS (the official image's)"})
 
 (def ^:private stain-vars
   "stain/jena-fuseki's interface, with what to use instead. Named individually
@@ -172,6 +191,13 @@
             :when (not (contains? stain-vars v))]
       (log "WARNING:" v "is not read by this image — it is stain/jena-fuseki's."
            "Use a :datasets entry in fuseki.edn."))
+    ;; Names people set from habit with other Java images. Neither the dist
+    ;; script nor the official container reads them, so the heap they asked
+    ;; for is not the heap they got, and nothing about the running server
+    ;; says so.
+    (doseq [[v instead] (sort looks-like-heap)
+            :when (contains? names v)]
+      (log "WARNING:" v "is not read by this image. Use" (str instead ".")))
     (doseq [v (sort names)
             :when (and (str/starts-with? v "FUSEKI_")
                        (not (contains? consumed v))
@@ -467,17 +493,33 @@
                              (str (name op) " " (str/join " " paths))))))
     (log "effective shiro  ->" eff-shiro "(secrets not logged)")
     (log "effective port   ->" eff-port (str "(" port ")"))
-    (let [launch (case ui
-                   "on"  ["java" "-jar" jar]
-                   "off" ["java" "-cp" jar plain-main]
-                   (die "ui must be 'on' or 'off', got:" ui))
-          ;; ONE vector, logged and executed. `log` is println with varargs, so
-          ;; the previous line printed "--port= 3030  --config= ..." — an argv you
-          ;; could not paste, on the one line whose whole job is telling you what
-          ;; ran. It also said "fuseki-server", which is neither `java -jar` nor
-          ;; `java -cp ... FusekiServerPlainCmd`.
-          args   (into launch [(str "--port=" port) (str "--config=" eff-cfg)])]
-      (log "ui mode:" (if (= ui "off") "headless — no UI, no admin area" "Fuseki's own UI + admin area"))
+    (let [extra   (launch/extra-dir base)
+          cp      (launch/classpath jar extra)
+          {:keys [class from ignored error]} (launch/main-class {:main env-main :ui ui :ui-explicit? (some? env-ui)})
+          _       (when error (die error))
+          jvm     (launch/jvm-args {:jvm-args env-jvm-args :java-options env-java-options})
+          log4j   (launch/logging-arg
+                   {:logging      env-logging
+                    :mounted?     (fs/exists? "/fuseki/log4j2.properties")
+                    :mounted-path "/fuseki/log4j2.properties"
+                    :dist?        (fs/exists? (str fuseki-home "/log4j2.properties"))
+                    :dist-path    (str fuseki-home "/log4j2.properties")})
+          args    (launch/argv {:java java-bin :jvm (:args jvm) :logging (:arg log4j)
+                                :cp cp :class class
+                                :args [(str "--port=" port) (str "--config=" eff-cfg)]})]
+      (when extra
+        (log "extra jars      ->" extra
+             (str "(" (count (launch/jars-in extra)) " on the classpath)")))
+      (log "server class    ->" class (str "(from " from ")"))
+      (when ignored
+        (log "server class    -> ignoring" ignored "— MAIN is set and wins"))
+      (log "jvm args        ->" (if (seq (:args jvm)) (str/join " " (:args jvm)) "(none)")
+           (str "(" (:from jvm) ")"))
+      (log "logging         ->" (if log4j (:arg log4j) "(none — log4j's built-in default)")
+           (if log4j (str "(from " (:from log4j) ")") ""))
+      ;; ONE vector, logged and executed. `log` is println with varargs, so an
+      ;; earlier version printed "--port= 3030  --config= ..." — an argv you could
+      ;; not paste, on the one line whose whole job is telling you what ran.
       (log "exec:" (str/join " " args))
       ;; exec (not run) so Fuseki is PID 1's child with clean signal handling.
       (p/exec args))))

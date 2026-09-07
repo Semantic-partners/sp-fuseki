@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # sp-fuseki — clean, config-respecting Apache Jena Fuseki.
-# Built from the pinned Jena dist (archive.apache.org — permanent), Temurin 21,
+# Built from the pinned Jena dist (Apache's CDN, falling back to the permanent
+# archive), Temurin 21,
 # babashka entrypoint. Multi-arch (amd64 + arm64), non-root, healthchecked.
 
 # --- versions (Renovate-managed) ---
@@ -9,7 +10,17 @@
 # versions listed in EXTRA_JENA (.github/workflows/build.yml) via --build-arg.
 # renovate: datasource=maven depName=org.apache.jena:jena-fuseki-server
 ARG JENA_VERSION=6.2.0
-# Temurin 21 JRE — Jena 6.x targets Java 21. (Renovate datasource TBD; bump with Jena.)
+# Temurin JRE. The MAJOR is derived from this string, not written twice, because
+# the release repo (`temurin<major>-binaries`) and the filename (`OpenJDK<major>U-`)
+# both encode it — and a matrix over JREs that hardcoded 21 in either would fetch
+# a 21 JRE while claiming to be something else.
+#
+# Jena 6.x targets Java 21, so 21 stays the default and the leg that gets `latest`.
+# CI builds the versions in EXTRA_JRE alongside it. The reason those legs exist is
+# extension jars: `java.lang.foreign` (Panama) is a PREVIEW API in 21 and final in
+# 22, so a jar compiled for release 22 or later will not load on a 21 JVM at all —
+# it is refused on class file version before any API question arises.
+# (Renovate datasource TBD; bump with Jena.)
 ARG TEMURIN_VERSION=21.0.5+11
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
 ARG BB_VERSION=1.12.216
@@ -49,7 +60,12 @@ RUN apt-get update \
 # A Jena release cut by a different release manager WILL fail this check. That is
 # deliberate: trusting a new signer should be a person's decision, not a silent
 # consequence of a version bump. Update this in the same commit as JENA_VERSION.
-ARG JENA_KEY_FPR=D99038A1731B8B31B71549EF04C95136D236A58F
+# FINGERPRINT, not KEY, in the name: BuildKit's SecretsUsedInArgOrEnv check reads
+# any ARG whose name contains "KEY" as a leaked credential and warns on every
+# build leg. A PGP fingerprint is the opposite of a secret — it is the public pin
+# we verify signatures AGAINST, and publishing it is the point. Renaming keeps the
+# check armed for a real secret instead of teaching everyone to skip its output.
+ARG JENA_SIGNING_FINGERPRINT=D99038A1731B8B31B71549EF04C95136D236A58F
 
 # Adoptium's signing key, same reasoning. 3B04D753... is
 # "Adoptium GPG Key (DEB/RPM Signing Key) <temurin-dev@eclipse.org>", the issuer
@@ -58,16 +74,21 @@ ARG JENA_KEY_FPR=D99038A1731B8B31B71549EF04C95136D236A58F
 # Its public key comes from a KEYSERVER rather than from the release host, which
 # is strictly better than the Apache case above: the key and the artifact then
 # travel different channels, so compromising the download host is not enough.
-ARG TEMURIN_KEY_FPR=3B04D753C9050D9A5D343F39843C48A565F8F04B
+ARG TEMURIN_SIGNING_FINGERPRINT=3B04D753C9050D9A5D343F39843C48A565F8F04B
 
 # Patient, exponential backoff — NOT a fixed short delay. GitHub rate-limits
 # unauthenticated release downloads, and a run fetches these once per target
 # platform per job, so the limit is reachable. `--retry 5 --retry-delay 3` spans
 # only ~15s and lost to a 503; no --retry-delay means curl backs off
 # exponentially, and --retry-max-time lets it ride out a throttle window.
-ENV CURL="curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20"
+# --speed-limit/--speed-time abort a transfer stalled below 1KB/s for 30s so it is
+# RETRIED, instead of sitting inside the retry budget doing nothing. The budget is
+# 900s because the archive mirror serves the 57MB Fuseki dist at ~150KB/s — six
+# minutes on a good day, and CI hit exit 28 (curl's operation timeout) against the
+# old 300s once two JRE legs were pulling it at once.
+ENV CURL="curl -fsSL --retry 8 --retry-max-time 900 --retry-all-errors --connect-timeout 20 --speed-limit 1024 --speed-time 30"
 
-# Temurin JRE 21 for the TARGET arch.
+# Temurin JRE for the TARGET arch, at whatever TEMURIN_VERSION says.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) JRE_ARCH=x64 ;; \
@@ -75,28 +96,43 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     V="$TEMURIN_VERSION"; \
+    # Everything before the first dot or plus: "21.0.5+11" -> 21, "26+37" -> 26.
+    MAJOR="$(echo "$V" | sed 's/[.+].*$//')"; \
+    case "$MAJOR" in ''|*[!0-9]*) echo "TEMURIN_VERSION=$V has no numeric major" >&2; exit 1 ;; esac; \
+    echo "jre: Temurin $V (major $MAJOR) for $JRE_ARCH"; \
     TAG="jdk-$(echo "$V" | sed 's/+/%2B/')"; \
-    FILE="OpenJDK21U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
-    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
-    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}.sha256.txt" -o /tmp/jre.sha256; \
+    FILE="OpenJDK${MAJOR}U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
+    $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
+    $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}.sha256.txt" -o /tmp/jre.sha256; \
     echo "$(cut -d' ' -f1 /tmp/jre.sha256)  /tmp/jre.tgz" | sha256sum -c -; \
     # Provenance, same shape as Fuseki below: pinned fingerprint, gpg's status
     # stream rather than its exit code. The key comes from a keyserver, so it and
     # the artifact do not share a host.
-    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}.sig" -o /tmp/jre.sig; \
-    $CURL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${TEMURIN_KEY_FPR}" -o /tmp/temurin-key.asc; \
+    $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}.sig" -o /tmp/jre.sig; \
+    $CURL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${TEMURIN_SIGNING_FINGERPRINT}" -o /tmp/temurin-key.asc; \
     export GNUPGHOME=/tmp/gnupg-jre; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/temurin-key.asc; \
     gpg --batch --status-fd 1 --verify /tmp/jre.sig /tmp/jre.tgz \
-      | tee /tmp/jre.status | grep -q "^\[GNUPG:\] VALIDSIG ${TEMURIN_KEY_FPR} " \
-      || { echo "FATAL: JRE .sig is not a valid signature from ${TEMURIN_KEY_FPR}" >&2; \
+      | tee /tmp/jre.status | grep -q "^\[GNUPG:\] VALIDSIG ${TEMURIN_SIGNING_FINGERPRINT} " \
+      || { echo "FATAL: JRE .sig is not a valid signature from ${TEMURIN_SIGNING_FINGERPRINT}" >&2; \
            cat /tmp/jre.status >&2; exit 1; }; \
-    echo "provenance: JRE signature verified against pinned key ${TEMURIN_KEY_FPR}"; \
+    echo "provenance: JRE signature verified against pinned key ${TEMURIN_SIGNING_FINGERPRINT}"; \
     mkdir -p /out/jre; tar -xzf /tmp/jre.tgz -C /out/jre --strip-components=1; \
     rm -rf /tmp/jre.tgz /tmp/jre.sha256 /tmp/jre.sig /tmp/temurin-key.asc /tmp/jre.status "$GNUPGHOME"
 
-# Apache Jena Fuseki (standalone, arch-independent). archive.apache.org is
-# permanent — dlcdn is latest-only and 404s a pinned version once a newer Jena ships.
+# Apache Jena Fuseki (standalone, arch-independent).
+#
+# TWO MIRRORS, in speed order. dlcdn is Apache's CDN and serves the current
+# release at ~13MB/s; archive.apache.org is permanent but measured at ~150KB/s —
+# 88x slower, six minutes for this tarball, and the reason a CI leg died with curl
+# exit 28. dlcdn carries only CURRENT releases and 404s a pinned version once a
+# newer Jena ships, so archive stays as the fallback rather than the default: the
+# older legs EXTRA_JENA can name exist only there.
+#
+# A mirror is safe here precisely because of what follows it. The checksum and the
+# signature are checked against Apache's published files and a pinned fingerprint
+# whichever host the bytes came from, so a mirror serving something else fails the
+# build rather than shipping.
 #
 # EVERY artifact fetched here is checksum-verified. It used to be only babashka,
 # with a comment explaining why — reasoning that applied at least as strongly to
@@ -111,26 +147,49 @@ RUN set -eux; \
 # The sha512 says the bytes arrived intact. It cannot say they are Apache's,
 # because the checksum travels the same channel as the artifact — anyone who can
 # alter one can alter the other. The .asc signature is the provenance claim, and
-# it only means something because JENA_KEY_FPR above is pinned.
+# it only means something because JENA_SIGNING_FINGERPRINT above is pinned.
 #
 # `--status-fd 1` plus a grep for VALIDSIG <fpr> is used rather than gpg's exit
 # code on purpose: gpg exits 0 for a good signature from an untrusted key, so
 # `gpg --verify && echo ok` would pass for a tarball signed by anybody at all.
 RUN set -eux; \
-    BASE="https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
-    $CURL "$BASE" -o /tmp/fuseki.tgz; \
-    # Apache publishes .sha512 here, not .sha256 (that URL 404s).
-    $CURL "${BASE}.sha512" -o /tmp/fuseki.sha512; \
+    CDN="https://dlcdn.apache.org/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
+    ARCHIVE="https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
+    # Apache publishes .sha512 beside the tarball, not .sha256 (that URL 404s).
+    # All three files come from the SAME mirror: a checksum from one host and a
+    # tarball from another proves only that two hosts disagree.
+    # The mirror is CHOSEN with a HEAD that does not retry, then fetched with the
+    # policy above. $CURL carries --retry-all-errors, which dutifully retries a 404
+    # eight times: probing a missing version with it spent 255 seconds discovering
+    # what one HEAD answers in a tenth of a second. Retries belong on the 57MB body,
+    # not on the question of which host has it.
+    FETCHED=""; \
+    for BASE in "$CDN" "$ARCHIVE"; do \
+      if ! curl -fsS --head --connect-timeout 20 --max-time 30 "$BASE" >/dev/null 2>&1; then \
+        echo "not on this mirror: $BASE"; continue; \
+      fi; \
+      echo "fetching from $BASE"; \
+      if $CURL "$BASE" -o /tmp/fuseki.tgz \
+         && $CURL "${BASE}.sha512" -o /tmp/fuseki.sha512 \
+         && $CURL "${BASE}.asc" -o /tmp/fuseki.asc; then \
+        FETCHED="$BASE"; break; \
+      fi; \
+      # A mirror that answered HEAD and then failed mid-transfer gets no second
+      # chance here, but the next mirror does.
+      echo "download failed from $BASE"; \
+      rm -f /tmp/fuseki.tgz /tmp/fuseki.sha512 /tmp/fuseki.asc; \
+    done; \
+    [ -n "$FETCHED" ] || { echo "FATAL: no mirror served apache-jena-fuseki-${JENA_VERSION}" >&2; exit 1; }; \
+    echo "fetched from $FETCHED"; \
     echo "$(cut -d' ' -f1 /tmp/fuseki.sha512)  /tmp/fuseki.tgz" | sha512sum -c -; \
-    $CURL "${BASE}.asc" -o /tmp/fuseki.asc; \
     $CURL "https://downloads.apache.org/jena/KEYS" -o /tmp/jena-KEYS; \
     export GNUPGHOME=/tmp/gnupg; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/jena-KEYS; \
     gpg --batch --status-fd 1 --verify /tmp/fuseki.asc /tmp/fuseki.tgz \
-      | tee /tmp/gpg.status | grep -q "^\[GNUPG:\] VALIDSIG ${JENA_KEY_FPR} " \
-      || { echo "FATAL: Fuseki .asc is not a valid signature from ${JENA_KEY_FPR}" >&2; \
+      | tee /tmp/gpg.status | grep -q "^\[GNUPG:\] VALIDSIG ${JENA_SIGNING_FINGERPRINT} " \
+      || { echo "FATAL: Fuseki .asc is not a valid signature from ${JENA_SIGNING_FINGERPRINT}" >&2; \
            cat /tmp/gpg.status >&2; exit 1; }; \
-    echo "provenance: signature verified against pinned key ${JENA_KEY_FPR}"; \
+    echo "provenance: signature verified against pinned key ${JENA_SIGNING_FINGERPRINT}"; \
     mkdir -p /out/fuseki; tar -xzf /tmp/fuseki.tgz -C /out/fuseki --strip-components=1; \
     rm -rf /tmp/fuseki.tgz /tmp/fuseki.sha512 /tmp/fuseki.asc /tmp/jena-KEYS /tmp/gpg.status "$GNUPGHOME"; \
     test -f /out/fuseki/fuseki-server.jar

@@ -27,9 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTRA_JENA: ''
+      EXTRA_JRE: 25.0.4.1+1
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
+      jres: ${{ steps.p.outputs.jres }}
       build: ${{ steps.p.outputs.build }}
       image: ${{ steps.p.outputs.image }}
     steps:
@@ -42,6 +44,15 @@ jobs:
         # EXTRA_JENA is a space-separated list, so the split is deliberate.
         # shellcheck disable=SC2086
         MATRIX="$(printf '%s\n' $EXTRA_JENA "$DEF" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)"
+        JRE_DEF="$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)"
+        [ -n "$JRE_DEF" ] || { echo "could not read ARG TEMURIN_VERSION from image/Dockerfile" >&2; exit 1; }
+        # One object per JRE leg: the whole version for the build-arg, the major for
+        # the tag, and whether it is the default — which decides whether that tag
+        # carries a -jre suffix at all.
+        # shellcheck disable=SC2086
+        JRES="$(printf '%s\n' $EXTRA_JRE "$JRE_DEF" | sed '/^$/d' | sort -u -V \
+          | jq -R --arg def "$JRE_DEF" '{version: ., major: (.|split(".")[0]|split("+")[0]), default: (. == $def)}' \
+          | jq -sc .)"
         OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
         # CalVer plus the commit, computed ONCE so every Jena leg of a run agrees.
         # UTC: a stamp in local time is ambiguous twice a year and wrong to anyone
@@ -53,6 +64,7 @@ jobs:
           echo "default=$DEF"
           echo "matrix=$MATRIX"
           echo "build=$BUILD"
+          echo "jres=$JRES"
           # GHCR requires a lowercase image name.
           echo "image=${REGISTRY}/${OWNER}/sp-fuseki"
         } >> "$GITHUB_OUTPUT"
@@ -64,6 +76,7 @@ jobs:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        jre: ${{ fromJSON(needs.plan.outputs.jres) }}
         arch:
         - amd64
         - arm64
@@ -76,18 +89,19 @@ jobs:
         context: .
         file: image/Dockerfile
         load: true
-        tags: sp-fuseki:ci-${{ matrix.jena }}
+        tags: sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }}
         platforms: linux/${{ matrix.arch }}
         build-args: |
           JENA_VERSION=${{ matrix.jena }}
-        cache-from: type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
-        cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
+          TEMURIN_VERSION=${{ matrix.jre.version }}
+        cache-from: type=gha,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
+        cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
     - name: Unit tests (fuseki.edn renderer + this workflow)
       run: |
         docker run --rm -v "$PWD:/w" -w /w \
-          --entrypoint bash sp-fuseki:ci-${{ matrix.jena }} test/unit.sh
+          --entrypoint bash sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }} test/unit.sh
     - name: Packaging smoke test
-      run: IMAGE=sp-fuseki:ci-${{ matrix.jena }} bash test/smoke.sh
+      run: IMAGE=sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }} bash test/smoke.sh
   publish:
     needs:
     - plan
@@ -98,6 +112,7 @@ jobs:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        jre: ${{ fromJSON(needs.plan.outputs.jres) }}
         arch:
         - amd64
         - arm64
@@ -137,11 +152,12 @@ jobs:
         platforms: linux/${{ matrix.arch }}
         build-args: |
           JENA_VERSION=${{ matrix.jena }}
+          TEMURIN_VERSION=${{ matrix.jre.version }}
         outputs: type=image,name=${{ needs.plan.outputs.image }},push-by-digest=true,name-canonical=true,push=true
         provenance: true
         sbom: true
-        cache-from: type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
-        cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}
+        cache-from: type=gha,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
+        cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
     - name: Stash the digest for the merge job
       run: |
         set -euo pipefail
@@ -149,7 +165,7 @@ jobs:
         echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
     - uses: actions/upload-artifact@v4
       with:
-        name: digest-${{ matrix.jena }}-${{ matrix.arch }}
+        name: digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
         path: /tmp/digests/*
         retention-days: 1
         if-no-files-found: error
@@ -168,6 +184,7 @@ jobs:
       fail-fast: false
       matrix:
         jena: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        jre: ${{ fromJSON(needs.plan.outputs.jres) }}
     permissions:
       contents: read
       packages: write
@@ -176,7 +193,7 @@ jobs:
     steps:
     - uses: actions/download-artifact@v4
       with:
-        pattern: digest-${{ matrix.jena }}-*
+        pattern: digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-*
         merge-multiple: true
         path: /tmp/digests
     - uses: docker/setup-buildx-action@v3
@@ -209,10 +226,10 @@ jobs:
       with:
         images: ${{ needs.plan.outputs.image }}
         tags: |
-          type=raw,value=${{ matrix.jena }}-${{ needs.plan.outputs.build }},enable=${{ github.event_name != 'pull_request' }}
-          type=raw,value=${{ matrix.jena }},enable=${{ github.event_name != 'pull_request' }}
-          type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && matrix.jena == needs.plan.outputs.default && github.ref == 'refs/heads/main' }}
-          type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }},enable=${{ github.event_name == 'pull_request' }}
+          type=raw,value=${{ matrix.jena }}${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }}-${{ needs.plan.outputs.build }},enable=${{ github.event_name != 'pull_request' }}
+          type=raw,value=${{ matrix.jena }}${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }},enable=${{ github.event_name != 'pull_request' }}
+          type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && matrix.jena == needs.plan.outputs.default && matrix.jre.default && github.ref == 'refs/heads/main' }}
+          type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }}${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }},enable=${{ github.event_name == 'pull_request' }}
     - name: Create the manifest list
       id: merge
       env:
@@ -278,7 +295,7 @@ jobs:
       if: github.event_name != 'pull_request' && always()
       uses: actions/upload-artifact@v4
       with:
-        name: trivy-${{ matrix.jena }}
+        name: trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}
         path: trivy.sarif
         retention-days: 30
         if-no-files-found: warn
@@ -287,7 +304,7 @@ jobs:
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: trivy.sarif
-        category: trivy-${{ matrix.jena }}
+        category: trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}
     - name: Sign image (cosign keyless)
       if: github.event_name != 'pull_request'
       env:
