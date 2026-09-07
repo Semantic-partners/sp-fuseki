@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # sp-fuseki — clean, config-respecting Apache Jena Fuseki.
-# Built from the pinned Jena dist (archive.apache.org — permanent), Temurin 21,
+# Built from the pinned Jena dist (Apache's CDN, falling back to the permanent
+# archive), Temurin 21,
 # babashka entrypoint. Multi-arch (amd64 + arm64), non-root, healthchecked.
 
 # --- versions (Renovate-managed) ---
@@ -80,7 +81,12 @@ ARG TEMURIN_SIGNING_FINGERPRINT=3B04D753C9050D9A5D343F39843C48A565F8F04B
 # platform per job, so the limit is reachable. `--retry 5 --retry-delay 3` spans
 # only ~15s and lost to a 503; no --retry-delay means curl backs off
 # exponentially, and --retry-max-time lets it ride out a throttle window.
-ENV CURL="curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20"
+# --speed-limit/--speed-time abort a transfer stalled below 1KB/s for 30s so it is
+# RETRIED, instead of sitting inside the retry budget doing nothing. The budget is
+# 900s because the archive mirror serves the 57MB Fuseki dist at ~150KB/s — six
+# minutes on a good day, and CI hit exit 28 (curl's operation timeout) against the
+# old 300s once two JRE legs were pulling it at once.
+ENV CURL="curl -fsSL --retry 8 --retry-max-time 900 --retry-all-errors --connect-timeout 20 --speed-limit 1024 --speed-time 30"
 
 # Temurin JRE for the TARGET arch, at whatever TEMURIN_VERSION says.
 RUN set -eux; \
@@ -114,8 +120,19 @@ RUN set -eux; \
     mkdir -p /out/jre; tar -xzf /tmp/jre.tgz -C /out/jre --strip-components=1; \
     rm -rf /tmp/jre.tgz /tmp/jre.sha256 /tmp/jre.sig /tmp/temurin-key.asc /tmp/jre.status "$GNUPGHOME"
 
-# Apache Jena Fuseki (standalone, arch-independent). archive.apache.org is
-# permanent — dlcdn is latest-only and 404s a pinned version once a newer Jena ships.
+# Apache Jena Fuseki (standalone, arch-independent).
+#
+# TWO MIRRORS, in speed order. dlcdn is Apache's CDN and serves the current
+# release at ~13MB/s; archive.apache.org is permanent but measured at ~150KB/s —
+# 88x slower, six minutes for this tarball, and the reason a CI leg died with curl
+# exit 28. dlcdn carries only CURRENT releases and 404s a pinned version once a
+# newer Jena ships, so archive stays as the fallback rather than the default: the
+# older legs EXTRA_JENA can name exist only there.
+#
+# A mirror is safe here precisely because of what follows it. The checksum and the
+# signature are checked against Apache's published files and a pinned fingerprint
+# whichever host the bytes came from, so a mirror serving something else fails the
+# build rather than shipping.
 #
 # EVERY artifact fetched here is checksum-verified. It used to be only babashka,
 # with a comment explaining why — reasoning that applied at least as strongly to
@@ -136,12 +153,35 @@ RUN set -eux; \
 # code on purpose: gpg exits 0 for a good signature from an untrusted key, so
 # `gpg --verify && echo ok` would pass for a tarball signed by anybody at all.
 RUN set -eux; \
-    BASE="https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
-    $CURL "$BASE" -o /tmp/fuseki.tgz; \
-    # Apache publishes .sha512 here, not .sha256 (that URL 404s).
-    $CURL "${BASE}.sha512" -o /tmp/fuseki.sha512; \
+    CDN="https://dlcdn.apache.org/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
+    ARCHIVE="https://archive.apache.org/dist/jena/binaries/apache-jena-fuseki-${JENA_VERSION}.tar.gz"; \
+    # Apache publishes .sha512 beside the tarball, not .sha256 (that URL 404s).
+    # All three files come from the SAME mirror: a checksum from one host and a
+    # tarball from another proves only that two hosts disagree.
+    # The mirror is CHOSEN with a HEAD that does not retry, then fetched with the
+    # policy above. $CURL carries --retry-all-errors, which dutifully retries a 404
+    # eight times: probing a missing version with it spent 255 seconds discovering
+    # what one HEAD answers in a tenth of a second. Retries belong on the 57MB body,
+    # not on the question of which host has it.
+    FETCHED=""; \
+    for BASE in "$CDN" "$ARCHIVE"; do \
+      if ! curl -fsS --head --connect-timeout 20 --max-time 30 "$BASE" >/dev/null 2>&1; then \
+        echo "not on this mirror: $BASE"; continue; \
+      fi; \
+      echo "fetching from $BASE"; \
+      if $CURL "$BASE" -o /tmp/fuseki.tgz \
+         && $CURL "${BASE}.sha512" -o /tmp/fuseki.sha512 \
+         && $CURL "${BASE}.asc" -o /tmp/fuseki.asc; then \
+        FETCHED="$BASE"; break; \
+      fi; \
+      # A mirror that answered HEAD and then failed mid-transfer gets no second
+      # chance here, but the next mirror does.
+      echo "download failed from $BASE"; \
+      rm -f /tmp/fuseki.tgz /tmp/fuseki.sha512 /tmp/fuseki.asc; \
+    done; \
+    [ -n "$FETCHED" ] || { echo "FATAL: no mirror served apache-jena-fuseki-${JENA_VERSION}" >&2; exit 1; }; \
+    echo "fetched from $FETCHED"; \
     echo "$(cut -d' ' -f1 /tmp/fuseki.sha512)  /tmp/fuseki.tgz" | sha512sum -c -; \
-    $CURL "${BASE}.asc" -o /tmp/fuseki.asc; \
     $CURL "https://downloads.apache.org/jena/KEYS" -o /tmp/jena-KEYS; \
     export GNUPGHOME=/tmp/gnupg; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/jena-KEYS; \
