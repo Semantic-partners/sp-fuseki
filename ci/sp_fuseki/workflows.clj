@@ -88,6 +88,20 @@
   (str not-pr " || github.event.pull_request.head.repo.full_name == github.repository"))
 
 (def jena-matrix "${{ fromJSON(needs.plan.outputs.matrix) }}")
+
+(def jre-suffix
+  "Empty on the default JRE leg, `-jre26` on the others. Written once because it
+  appears on every tag: the default leg must keep the tags it already publishes,
+  or `6.2.0` would start meaning something different depending on which leg
+  finished last."
+  "${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }}")
+
+(def jre-matrix
+  "Objects, not strings: the tag needs the MAJOR (\"26\") while the build-arg needs
+  the whole version (\"26.0.2.1+1\"), and a GitHub expression cannot cut one out of
+  the other — that language has no regex. So plan emits both, plus whether the leg
+  is the default, which is what decides whether the tag carries a suffix."
+  "${{ fromJSON(needs.plan.outputs.jres) }}")
 (def arches-matrix
   "Both arches, always. This was a `plan` output while arm64 ran on our own
   hardware and a fork PR had to be dropped to amd64 only; with both legs on
@@ -95,7 +109,7 @@
   ["amd64" "arm64"])
 (def image "${{ needs.plan.outputs.image }}")
 
-(defn cache-scope [] "type=gha,scope=jena-${{ matrix.jena }}-${{ matrix.arch }}")
+(defn cache-scope [] "type=gha,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}")
 
 ;; ---------------------------------------------------------------------------
 ;; Jobs
@@ -117,9 +131,17 @@
      ;;
      ;; The mechanism stays: add a version here to publish it alongside the
      ;; Dockerfile's pin, and the gate will tell you if it's patchable.
-     :env (m :EXTRA_JENA "")
+     ;; EXTRA_JRE is EMPTY by default, so the axis adds nothing until someone
+     ;; needs it. Why it exists: `java.lang.foreign` (Panama) is preview in 21 and
+     ;; final in 22, so an extension jar compiled for release 22+ will not load on
+     ;; the default 21 JVM at all — refused on class file version, before any API
+     ;; question. A leg per JRE is cheaper than telling that user to build their
+     ;; own image, which is the argument this repository exists to make.
+     :env (m :EXTRA_JENA ""
+             :EXTRA_JRE "")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
+                 :jres "${{ steps.p.outputs.jres }}"
                  :build "${{ steps.p.outputs.build }}"
                  :image "${{ steps.p.outputs.image }}")
      :steps [(m :uses "actions/checkout@v4")
@@ -130,6 +152,15 @@
                           "# EXTRA_JENA is a space-separated list, so the split is deliberate.\n"
                           "# shellcheck disable=SC2086\n"
                           "MATRIX=\"$(printf '%s\\n' $EXTRA_JENA \"$DEF\" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)\"\n"
+                          "JRE_DEF=\"$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)\"\n"
+                          "[ -n \"$JRE_DEF\" ] || { echo \"could not read ARG TEMURIN_VERSION from image/Dockerfile\" >&2; exit 1; }\n"
+                          "# One object per JRE leg: the whole version for the build-arg, the major for\n"
+                          "# the tag, and whether it is the default — which decides whether that tag\n"
+                          "# carries a -jre suffix at all.\n"
+                          "# shellcheck disable=SC2086\n"
+                          "JRES=\"$(printf '%s\\n' $EXTRA_JRE \"$JRE_DEF\" | sed '/^$/d' | sort -u -V \\\n"
+                          "  | jq -R --arg def \"$JRE_DEF\" '{version: ., major: (.|split(\".\")[0]|split(\"+\")[0]), default: (. == $def)}' \\\n"
+                          "  | jq -sc .)\"\n"
                           "OWNER=\"$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')\"\n"
                           "# CalVer plus the commit, computed ONCE so every Jena leg of a run agrees.\n"
                           "# UTC: a stamp in local time is ambiguous twice a year and wrong to anyone\n"
@@ -141,6 +172,7 @@
                           "  echo \"default=$DEF\"\n"
                           "  echo \"matrix=$MATRIX\"\n"
                           "  echo \"build=$BUILD\"\n"
+                          "  echo \"jres=$JRES\"\n"
                           "  # GHCR requires a lowercase image name.\n"
                           "  echo \"image=${REGISTRY}/${OWNER}/sp-fuseki\"\n"
                           "} >> \"$GITHUB_OUTPUT\"\n"
@@ -157,7 +189,7 @@
   (m :needs "plan"
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
-                  :matrix (m :jena jena-matrix :arch arches-matrix))
+                  :matrix (m :jena jena-matrix :jre jre-matrix :arch arches-matrix))
      :steps [(m :uses "actions/checkout@v4")
              (m :uses "docker/setup-buildx-action@v3")
              (m :name "Build (native, load)"
@@ -165,9 +197,10 @@
                 :with (m :context "."
                          :file "image/Dockerfile"
                          :load true
-                         :tags "sp-fuseki:ci-${{ matrix.jena }}"
+                         :tags "sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }}"
                          :platforms "linux/${{ matrix.arch }}"
-                         :build-args "JENA_VERSION=${{ matrix.jena }}\n"
+                         :build-args (str "JENA_VERSION=${{ matrix.jena }}\n"
+                                          "TEMURIN_VERSION=${{ matrix.jre.version }}\n")
                          ;; Shared with publish, so JRE/Fuseki/babashka download
                          ;; once per leg rather than once per job. Fewer requests
                          ;; is the real fix for the GitHub 503s; retries only
@@ -178,9 +211,9 @@
              ;; setup action, no version skew. Sub-second, so it goes first.
              (m :name "Unit tests (fuseki.edn renderer + this workflow)"
                 :run (str "docker run --rm -v \"$PWD:/w\" -w /w \\\n"
-                          "  --entrypoint bash sp-fuseki:ci-${{ matrix.jena }} test/unit.sh\n"))
+                          "  --entrypoint bash sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }} test/unit.sh\n"))
              (m :name "Packaging smoke test"
-                :run "IMAGE=sp-fuseki:ci-${{ matrix.jena }} bash test/smoke.sh")]))
+                :run "IMAGE=sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }} bash test/smoke.sh")]))
 
 (def ^:private isolate-docker-step
   ;; Two bugs' worth of scar tissue, in order:
@@ -231,7 +264,7 @@
      :if same-repo-or-push
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
-                  :matrix (m :jena jena-matrix :arch arches-matrix))
+                  :matrix (m :jena jena-matrix :jre jre-matrix :arch arches-matrix))
      :permissions (m :contents "read" :packages "write")
      :steps [(m :uses "actions/checkout@v4")
              isolate-docker-step
@@ -243,7 +276,8 @@
                 :with (m :context "."
                          :file "image/Dockerfile"
                          :platforms "linux/${{ matrix.arch }}"
-                         :build-args "JENA_VERSION=${{ matrix.jena }}\n"
+                         :build-args (str "JENA_VERSION=${{ matrix.jena }}\n"
+                                          "TEMURIN_VERSION=${{ matrix.jre.version }}\n")
                          :outputs (str "type=image,name=" image
                                        ",push-by-digest=true,name-canonical=true,push=true")
                          :provenance true
@@ -255,7 +289,7 @@
                           "mkdir -p /tmp/digests\n"
                           "echo \"${{ steps.build.outputs.digest }}\" > \"/tmp/digests/${{ matrix.arch }}\"\n"))
              (m :uses "actions/upload-artifact@v4"
-                :with (m :name "digest-${{ matrix.jena }}-${{ matrix.arch }}"
+                :with (m :name "digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}"
                          :path "/tmp/digests/*"
                          :retention-days 1
                          :if-no-files-found "error"))
@@ -283,12 +317,13 @@
   ;; It was `github.run_number` before, which is neither: a counter that advances
   ;; for runs that changed nothing and tells you nothing without a lookup.
   (str/join "\n"
-            [(str "type=raw,value=${{ matrix.jena }}-${{ needs.plan.outputs.build }},enable=${{ " not-pr " }}")
-             (str "type=raw,value=${{ matrix.jena }},enable=${{ " not-pr " }}")
+            [(str "type=raw,value=${{ matrix.jena }}" jre-suffix "-${{ needs.plan.outputs.build }},enable=${{ " not-pr " }}")
+             (str "type=raw,value=${{ matrix.jena }}" jre-suffix ",enable=${{ " not-pr " }}")
              (str "type=raw,value=latest,enable=${{ " not-pr
                   " && matrix.jena == needs.plan.outputs.default"
+                  " && matrix.jre.default"
                   " && github.ref == 'refs/heads/main' }}")
-             "type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }},enable=${{ github.event_name == 'pull_request' }}"
+             (str "type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }}" jre-suffix ",enable=${{ github.event_name == 'pull_request' }}")
              ""]))
 
 (def merge-job
@@ -297,12 +332,12 @@
   (m :needs ["plan" "publish"]
      :if same-repo-or-push
      :runs-on hosted
-     :strategy (m :fail-fast false :matrix (m :jena jena-matrix))
+     :strategy (m :fail-fast false :matrix (m :jena jena-matrix :jre jre-matrix))
      :permissions (m :contents "read" :packages "write" :id-token "write"
                      ;; for the code-scanning upload
                      :security-events "write")
      :steps [(m :uses "actions/download-artifact@v4"
-                :with (m :pattern "digest-${{ matrix.jena }}-*"
+                :with (m :pattern "digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-*"
                          :merge-multiple true
                          :path "/tmp/digests"))
              (m :uses "docker/setup-buildx-action@v3")
@@ -423,7 +458,7 @@
              (m :name "Keep the report"
                 :if (str not-pr " && always()")
                 :uses "actions/upload-artifact@v4"
-                :with (m :name "trivy-${{ matrix.jena }}"
+                :with (m :name "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}"
                          :path "trivy.sarif"
                          :retention-days 30
                          :if-no-files-found "warn"))
@@ -435,7 +470,7 @@
                 :if (str not-pr " && always() && github.event.repository.private == false")
                 :uses "github/codeql-action/upload-sarif@v3"
                 :with (m :sarif_file "trivy.sarif"
-                         :category (str "trivy-${{ matrix.jena }}")))
+                         :category (str "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}")))
              (m :name "Sign image (cosign keyless)"
                 :if not-pr
                 :env (m :IMG image :DIGEST "${{ steps.merge.outputs.digest }}")

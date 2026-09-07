@@ -708,6 +708,22 @@ what it merely reports), and signs (cosign keyless). The default leg is whatever
 `image/Dockerfile` pins; additional older versions can be published alongside it by
 listing them in `EXTRA_JENA`, which is currently **empty**.
 
+The JRE is a second axis. `image/Dockerfile` pins the default — Temurin 21, which
+is what Jena 6.x targets — and `EXTRA_JRE` adds legs beside it, tagged
+`<jena>-jre<major>`:
+
+```
+ghcr.io/semantic-partners/sp-fuseki:6.2.0            # the default JRE
+ghcr.io/semantic-partners/sp-fuseki:6.2.0-jre26      # an EXTRA_JRE leg
+```
+
+The default leg's tags are unsuffixed, so `6.2.0` and `latest` keep meaning what
+they already meant. That axis exists for extension jars: `java.lang.foreign`
+(Panama) is a preview API in 21 and final in 22, so **a jar compiled for release
+22 or later will not load on a 21 JVM at all** — it is refused on class file
+version, before any API question arises. Someone in that position should be able
+to pull a tag rather than fork this Dockerfile.
+
 We published 6.1.0 briefly and stopped: the scan gate found two HIGH findings with
 fixes available in that image's bundled jars — `shiro-core` 2.1.0
 ([CVE-2026-49268](https://avd.aquasec.com/nvd/cve-2026-49268)) and `jetty-security`

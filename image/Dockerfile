@@ -9,7 +9,17 @@
 # versions listed in EXTRA_JENA (.github/workflows/build.yml) via --build-arg.
 # renovate: datasource=maven depName=org.apache.jena:jena-fuseki-server
 ARG JENA_VERSION=6.2.0
-# Temurin 21 JRE — Jena 6.x targets Java 21. (Renovate datasource TBD; bump with Jena.)
+# Temurin JRE. The MAJOR is derived from this string, not written twice, because
+# the release repo (`temurin<major>-binaries`) and the filename (`OpenJDK<major>U-`)
+# both encode it — and a matrix over JREs that hardcoded 21 in either would fetch
+# a 21 JRE while claiming to be something else.
+#
+# Jena 6.x targets Java 21, so 21 stays the default and the leg that gets `latest`.
+# CI builds the versions in EXTRA_JRE alongside it. The reason those legs exist is
+# extension jars: `java.lang.foreign` (Panama) is a PREVIEW API in 21 and final in
+# 22, so a jar compiled for release 22 or later will not load on a 21 JVM at all —
+# it is refused on class file version before any API question arises.
+# (Renovate datasource TBD; bump with Jena.)
 ARG TEMURIN_VERSION=21.0.5+11
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
 ARG BB_VERSION=1.12.216
@@ -67,7 +77,7 @@ ARG TEMURIN_KEY_FPR=3B04D753C9050D9A5D343F39843C48A565F8F04B
 # exponentially, and --retry-max-time lets it ride out a throttle window.
 ENV CURL="curl -fsSL --retry 8 --retry-max-time 300 --retry-all-errors --connect-timeout 20"
 
-# Temurin JRE 21 for the TARGET arch.
+# Temurin JRE for the TARGET arch, at whatever TEMURIN_VERSION says.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) JRE_ARCH=x64 ;; \
@@ -75,15 +85,19 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     V="$TEMURIN_VERSION"; \
+    # Everything before the first dot or plus: "21.0.5+11" -> 21, "26+37" -> 26.
+    MAJOR="$(echo "$V" | sed 's/[.+].*$//')"; \
+    case "$MAJOR" in ''|*[!0-9]*) echo "TEMURIN_VERSION=$V has no numeric major" >&2; exit 1 ;; esac; \
+    echo "jre: Temurin $V (major $MAJOR) for $JRE_ARCH"; \
     TAG="jdk-$(echo "$V" | sed 's/+/%2B/')"; \
-    FILE="OpenJDK21U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
-    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
-    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}.sha256.txt" -o /tmp/jre.sha256; \
+    FILE="OpenJDK${MAJOR}U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
+    $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}" -o /tmp/jre.tgz; \
+    $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}.sha256.txt" -o /tmp/jre.sha256; \
     echo "$(cut -d' ' -f1 /tmp/jre.sha256)  /tmp/jre.tgz" | sha256sum -c -; \
     # Provenance, same shape as Fuseki below: pinned fingerprint, gpg's status
     # stream rather than its exit code. The key comes from a keyserver, so it and
     # the artifact do not share a host.
-    $CURL "https://github.com/adoptium/temurin21-binaries/releases/download/${TAG}/${FILE}.sig" -o /tmp/jre.sig; \
+    $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}.sig" -o /tmp/jre.sig; \
     $CURL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${TEMURIN_KEY_FPR}" -o /tmp/temurin-key.asc; \
     export GNUPGHOME=/tmp/gnupg-jre; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/temurin-key.asc; \
