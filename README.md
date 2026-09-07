@@ -709,13 +709,19 @@ what it merely reports), and signs (cosign keyless). The default leg is whatever
 listing them in `EXTRA_JENA`, which is currently **empty**.
 
 The JRE is a second axis. `image/Dockerfile` pins the default — Temurin 21, which
-is what Jena 6.x targets — and `EXTRA_JRE` adds legs beside it, tagged
-`<jena>-jre<major>`:
+is what Jena 6.x targets (`Java-Version: 21` in the jar's own manifest) — and
+`EXTRA_JRE` adds legs beside it, tagged `<jena>-jre<major>`. Currently **25**, the
+LTS after 21:
 
 ```
-ghcr.io/semantic-partners/sp-fuseki:6.2.0            # the default JRE
-ghcr.io/semantic-partners/sp-fuseki:6.2.0-jre26      # an EXTRA_JRE leg
+ghcr.io/semantic-partners/sp-fuseki:6.2.0            # Temurin 21, the default
+ghcr.io/semantic-partners/sp-fuseki:6.2.0-jre25      # Temurin 25 (LTS)
 ```
+
+Only LTS versions go in that list without a specific reason. A feature release
+stops receiving Temurin builds about six months after it ships — Java 24's last
+one was over a year ago — and an image with no security updates is the thing this
+repository's CVE gate exists to prevent.
 
 The default leg's tags are unsuffixed, so `6.2.0` and `latest` keep meaning what
 they already meant. That axis exists for extension jars: `java.lang.foreign`

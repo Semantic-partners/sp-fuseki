@@ -138,7 +138,18 @@
      ;; question. A leg per JRE is cheaper than telling that user to build their
      ;; own image, which is the argument this repository exists to make.
      :env (m :EXTRA_JENA ""
-             :EXTRA_JRE "")
+             ;; 25 is the current LTS and where anyone doing this seriously should
+             ;; land. It is here rather than as the default because Jena 6.x
+             ;; targets 21 — the jar's own manifest says Java-Version: 21 — and a
+             ;; default that moves ahead of upstream's target changes what `6.2.0`
+             ;; and `latest` mean for people already pulling them.
+             ;;
+             ;; NOT 24, and the reason generalises: it is a feature release whose
+             ;; last Temurin build was over a year ago, so it takes no security
+             ;; updates. Publishing it would contradict the gate that made us drop
+             ;; the 6.1.0 Jena leg. Only LTS versions belong in this list unless
+             ;; someone needs a feature release for a specific reason.
+             :EXTRA_JRE "25.0.4.1+1")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
                  :jres "${{ steps.p.outputs.jres }}"

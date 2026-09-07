@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTRA_JENA: ''
-      EXTRA_JRE: ''
+      EXTRA_JRE: 25.0.4.1+1
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
