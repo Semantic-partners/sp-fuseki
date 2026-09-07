@@ -78,8 +78,8 @@
   ;; because it travels the same channel as the artifact. The signature is the
   ;; provenance claim — and it is worth nothing unless the SIGNER is pinned.
   (doseq [[label sig-file arg fatal]
-          [["Fuseki" "fuseki.asc" "JENA_KEY_FPR"    #"FATAL: Fuseki \.asc is not a valid signature"]
-           ["JRE"    "jre.sig"    "TEMURIN_KEY_FPR" #"FATAL: JRE \.sig is not a valid signature"]]]
+          [["Fuseki" "fuseki.asc" "JENA_SIGNING_FINGERPRINT"    #"FATAL: Fuseki \.asc is not a valid signature"]
+           ["JRE"    "jre.sig"    "TEMURIN_SIGNING_FINGERPRINT" #"FATAL: JRE \.sig is not a valid signature"]]]
     (testing label
       (let [block (first (filter #(str/includes? % sig-file) (run-blocks dockerfile)))]
         (is (some? block) (str label " must fetch its signature"))

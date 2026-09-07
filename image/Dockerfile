@@ -59,7 +59,12 @@ RUN apt-get update \
 # A Jena release cut by a different release manager WILL fail this check. That is
 # deliberate: trusting a new signer should be a person's decision, not a silent
 # consequence of a version bump. Update this in the same commit as JENA_VERSION.
-ARG JENA_KEY_FPR=D99038A1731B8B31B71549EF04C95136D236A58F
+# FINGERPRINT, not KEY, in the name: BuildKit's SecretsUsedInArgOrEnv check reads
+# any ARG whose name contains "KEY" as a leaked credential and warns on every
+# build leg. A PGP fingerprint is the opposite of a secret — it is the public pin
+# we verify signatures AGAINST, and publishing it is the point. Renaming keeps the
+# check armed for a real secret instead of teaching everyone to skip its output.
+ARG JENA_SIGNING_FINGERPRINT=D99038A1731B8B31B71549EF04C95136D236A58F
 
 # Adoptium's signing key, same reasoning. 3B04D753... is
 # "Adoptium GPG Key (DEB/RPM Signing Key) <temurin-dev@eclipse.org>", the issuer
@@ -68,7 +73,7 @@ ARG JENA_KEY_FPR=D99038A1731B8B31B71549EF04C95136D236A58F
 # Its public key comes from a KEYSERVER rather than from the release host, which
 # is strictly better than the Apache case above: the key and the artifact then
 # travel different channels, so compromising the download host is not enough.
-ARG TEMURIN_KEY_FPR=3B04D753C9050D9A5D343F39843C48A565F8F04B
+ARG TEMURIN_SIGNING_FINGERPRINT=3B04D753C9050D9A5D343F39843C48A565F8F04B
 
 # Patient, exponential backoff — NOT a fixed short delay. GitHub rate-limits
 # unauthenticated release downloads, and a run fetches these once per target
@@ -98,14 +103,14 @@ RUN set -eux; \
     # stream rather than its exit code. The key comes from a keyserver, so it and
     # the artifact do not share a host.
     $CURL "https://github.com/adoptium/temurin${MAJOR}-binaries/releases/download/${TAG}/${FILE}.sig" -o /tmp/jre.sig; \
-    $CURL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${TEMURIN_KEY_FPR}" -o /tmp/temurin-key.asc; \
+    $CURL "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${TEMURIN_SIGNING_FINGERPRINT}" -o /tmp/temurin-key.asc; \
     export GNUPGHOME=/tmp/gnupg-jre; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/temurin-key.asc; \
     gpg --batch --status-fd 1 --verify /tmp/jre.sig /tmp/jre.tgz \
-      | tee /tmp/jre.status | grep -q "^\[GNUPG:\] VALIDSIG ${TEMURIN_KEY_FPR} " \
-      || { echo "FATAL: JRE .sig is not a valid signature from ${TEMURIN_KEY_FPR}" >&2; \
+      | tee /tmp/jre.status | grep -q "^\[GNUPG:\] VALIDSIG ${TEMURIN_SIGNING_FINGERPRINT} " \
+      || { echo "FATAL: JRE .sig is not a valid signature from ${TEMURIN_SIGNING_FINGERPRINT}" >&2; \
            cat /tmp/jre.status >&2; exit 1; }; \
-    echo "provenance: JRE signature verified against pinned key ${TEMURIN_KEY_FPR}"; \
+    echo "provenance: JRE signature verified against pinned key ${TEMURIN_SIGNING_FINGERPRINT}"; \
     mkdir -p /out/jre; tar -xzf /tmp/jre.tgz -C /out/jre --strip-components=1; \
     rm -rf /tmp/jre.tgz /tmp/jre.sha256 /tmp/jre.sig /tmp/temurin-key.asc /tmp/jre.status "$GNUPGHOME"
 
@@ -125,7 +130,7 @@ RUN set -eux; \
 # The sha512 says the bytes arrived intact. It cannot say they are Apache's,
 # because the checksum travels the same channel as the artifact — anyone who can
 # alter one can alter the other. The .asc signature is the provenance claim, and
-# it only means something because JENA_KEY_FPR above is pinned.
+# it only means something because JENA_SIGNING_FINGERPRINT above is pinned.
 #
 # `--status-fd 1` plus a grep for VALIDSIG <fpr> is used rather than gpg's exit
 # code on purpose: gpg exits 0 for a good signature from an untrusted key, so
@@ -141,10 +146,10 @@ RUN set -eux; \
     export GNUPGHOME=/tmp/gnupg; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/jena-KEYS; \
     gpg --batch --status-fd 1 --verify /tmp/fuseki.asc /tmp/fuseki.tgz \
-      | tee /tmp/gpg.status | grep -q "^\[GNUPG:\] VALIDSIG ${JENA_KEY_FPR} " \
-      || { echo "FATAL: Fuseki .asc is not a valid signature from ${JENA_KEY_FPR}" >&2; \
+      | tee /tmp/gpg.status | grep -q "^\[GNUPG:\] VALIDSIG ${JENA_SIGNING_FINGERPRINT} " \
+      || { echo "FATAL: Fuseki .asc is not a valid signature from ${JENA_SIGNING_FINGERPRINT}" >&2; \
            cat /tmp/gpg.status >&2; exit 1; }; \
-    echo "provenance: signature verified against pinned key ${JENA_KEY_FPR}"; \
+    echo "provenance: signature verified against pinned key ${JENA_SIGNING_FINGERPRINT}"; \
     mkdir -p /out/fuseki; tar -xzf /tmp/fuseki.tgz -C /out/fuseki --strip-components=1; \
     rm -rf /tmp/fuseki.tgz /tmp/fuseki.sha512 /tmp/fuseki.asc /tmp/jena-KEYS /tmp/gpg.status "$GNUPGHOME"; \
     test -f /out/fuseki/fuseki-server.jar
