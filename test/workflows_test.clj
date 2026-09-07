@@ -87,8 +87,15 @@
     ;; of an existing tag would depend on which leg finished last.
     (doseq [l (str/split-lines (tags))
             :when (and (not (str/blank? l)) (not (str/includes? l "value=latest")))]
-      (is (str/includes? l "matrix.jre.default && ''")
-          (str "tag must be suffixed on non-default JRE legs only: " l))))
+      (is (str/includes? l "!matrix.jre.default && format('-jre{0}'")
+          (str "tag must be suffixed on non-default JRE legs only: " l))
+      ;; The trap this test previously walked into: it asserted the presence of
+      ;; `matrix.jre.default && ''`, which is the BROKEN idiom. GitHub's && and ||
+      ;; return operand values, so `true && ''` is the empty string, the empty
+      ;; string is falsy, `||` fires, and the default leg tags itself -jre21. It
+      ;; published that way once. The assertion above passed the whole time.
+      (is (not (str/includes? l "matrix.jre.default && ''"))
+          (str "the falsy-true-branch idiom publishes a suffix on the default leg: " l))))
   (testing "latest requires the default JRE as well as the default Jena"
     (is (str/includes? (tag-line "value=latest") "matrix.jre.default")))
   (testing "caches and digest artifacts are per-JRE, or two legs would overwrite each other"

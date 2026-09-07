@@ -90,18 +90,31 @@
 (def jena-matrix "${{ fromJSON(needs.plan.outputs.matrix) }}")
 
 (def jre-suffix
-  "Empty on the default JRE leg, `-jre26` on the others. Written once because it
+  "Empty on the default JRE leg, `-jre25` on the others. Written once because it
   appears on every tag: the default leg must keep the tags it already publishes,
   or `6.2.0` would start meaning something different depending on which leg
-  finished last."
-  "${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }}")
+  finished last.
+
+  INVERTED, and it has to be. The obvious form —
+  `matrix.jre.default && '' || format(...)` — is wrong, and wrong in a way that
+  publishes. GitHub's && and || return operand VALUES, not booleans, so on the
+  default leg `true && ''` is the empty string, the empty string is falsy, `||`
+  fires, and the default leg tags itself `-jre21`. That shipped once: `6.2.0`
+  stayed on the previous build while `latest` moved, which is the exact drift this
+  suffix exists to prevent.
+
+  This form has no falsy true-branch. On the default leg `!default` is false, so
+  `false && …` is false and `|| ''` supplies the empty suffix."
+  "${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }}")
 
 (def jre-matrix
-  "Objects, not strings: the tag needs the MAJOR (\"26\") while the build-arg needs
-  the whole version (\"26.0.2.1+1\"), and a GitHub expression cannot cut one out of
+  "Objects, not strings: the tag needs the MAJOR (\"25\") while the build-arg needs
+  the whole version (\"25.0.4.1+1\"), and a GitHub expression cannot cut one out of
   the other — that language has no regex. So plan emits both, plus whether the leg
   is the default, which is what decides whether the tag carries a suffix."
   "${{ fromJSON(needs.plan.outputs.jres) }}")
+
+
 (def arches-matrix
   "Both arches, always. This was a `plan` output while arm64 ran on our own
   hardware and a fork PR had to be dropped to amd64 only; with both legs on

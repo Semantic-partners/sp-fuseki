@@ -226,10 +226,10 @@ jobs:
       with:
         images: ${{ needs.plan.outputs.image }}
         tags: |
-          type=raw,value=${{ matrix.jena }}${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }}-${{ needs.plan.outputs.build }},enable=${{ github.event_name != 'pull_request' }}
-          type=raw,value=${{ matrix.jena }}${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }},enable=${{ github.event_name != 'pull_request' }}
+          type=raw,value=${{ matrix.jena }}${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }}-${{ needs.plan.outputs.build }},enable=${{ github.event_name != 'pull_request' }}
+          type=raw,value=${{ matrix.jena }}${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }},enable=${{ github.event_name != 'pull_request' }}
           type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && matrix.jena == needs.plan.outputs.default && matrix.jre.default && github.ref == 'refs/heads/main' }}
-          type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }}${{ matrix.jre.default && '' || format('-jre{0}', matrix.jre.major) }},enable=${{ github.event_name == 'pull_request' }}
+          type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }}${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }},enable=${{ github.event_name == 'pull_request' }}
     - name: Create the manifest list
       id: merge
       env:
