@@ -26,9 +26,9 @@ cd "$ROOT"
 # which files run, in what order, and which refuse the boot outright.
 bb --classpath "entrypoint:ci:test" \
    -e '(require (quote render-test) (quote workflows-test) (quote dockerfile-test)
-                (quote prestart-test))
+                (quote prestart-test) (quote launch-test))
        (let [{:keys [fail error]} (clojure.test/run-tests (quote render-test)
                                                           (quote workflows-test)
                                                           (quote dockerfile-test)
-                                                          (quote prestart-test))]
+                                                          (quote prestart-test) (quote launch-test))]
          (System/exit (if (pos? (+ fail error)) 1 0)))'

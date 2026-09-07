@@ -174,6 +174,8 @@ output, not a change to the value.
 | Shiro auth config | `/fuseki/shiro.ini` | If present, **honoured untouched** (your escape hatch for any auth setup, incl. SOPS-decrypted secrets). If absent, generated from `FUSEKI_AUTH`. |
 | **Persistent data** | `/fuseki/databases` | **Mount your volume here** for TDB2 datasets. Pre-created in the image and owned by uid 1000 — see below. |
 | Pre-start hooks | `/fuseki/pre-start.d` | Executable scripts run in filename order **before** the config is resolved — see below. Optional; absent is the normal case. |
+| Extra jars | `$FUSEKI_BASE/extra` | Every `.jar` here goes on the classpath — the dist's own mechanism for custom Graphs, assemblers, ARQ functions and FusekiModules. Same path and behaviour as upstream, so a working config ports unchanged. |
+| log4j config | `/fuseki/log4j2.properties` | If present, used instead of the dist's. No variable needed. |
 
 The **effective** config and shiro that actually run are always written to
 `$FUSEKI_BASE` (`config.effective.ttl`, `shiro.ini`) and their paths logged at
@@ -413,6 +415,12 @@ Creating it in the image costs an empty directory and removes the trap.
 | `FUSEKI_EDN` | `/fuseki/fuseki.edn` | Where to look for a mounted EDN config (used only if no `config.ttl`). |
 | `FUSEKI_TDB2_ROOT` | `/fuseki/databases` | Directory `:tdb2` datasets are rendered under. |
 | `FUSEKI_PRESTART` | `/fuseki/pre-start.d` | Directory of pre-start hooks. Set it and the directory must exist — a path you asked for and we cannot find is fatal. |
+| `JVM_ARGS` | — | JVM arguments, exactly as the dist's `fuseki-server` script reads them. Split on whitespace, so `-Xmx4G -XX:+UseZGC` is two arguments. |
+| `JAVA_OPTIONS` | — | The same thing under the official Apache image's name. `JVM_ARGS` wins if both are set. |
+| `MAIN` | — | Server posture, using the dist script's names: `basic`, `main`, `plain` / `server-plain`, `serverui` / `server-ui`. A fully-qualified class name also works. Wins over `FUSEKI_UI`, and says so. |
+| `LOGGING` | the dist's `log4j2.properties` | A whole JVM flag, passed through as the script does — normally `-Dlog4j.configurationFile=…`. |
+| `JAVA` | `java` | Which java binary to exec. |
+| `FUSEKI_HOME` | `/opt/fuseki` | Where the dist lives. Used to find `log4j2.properties`. |
 | `FUSEKI_SHIRO` | `/fuseki/shiro.ini` | Where to look for a mounted shiro.ini. |
 | `FUSEKI_PORT` | `3030` | Listen port. Also settable as `:server {:port n}` in `fuseki.edn`; env wins. The healthcheck follows whichever applied. |
 | `FUSEKI_DATASET` | `ds` | Name of the generated default dataset (when no config mounted). |
@@ -488,6 +496,38 @@ those would make the feature unusable exactly where people mount things from.
 > a crash-restart on the same volume boots clean. Two containers opening one volume
 > at once fail on the second, which is the outcome you want — and *deleting* the
 > lock file to "fix" that turns a refusal into two live writers on one database.
+
+### Upstream parity — every knob the dist's launcher has
+
+This image replaces the dist's `fuseki-server` shell script, so every extension
+point that script has is one somebody's existing deployment may be using. All of
+them are honoured, and the resolved value is logged with the name it came from:
+
+| The dist script does | Here |
+|---|---|
+| `CP="$JAR:$FUSEKI_BASE/extra/*"` | Same. Any jar in `$FUSEKI_BASE/extra` is on the classpath. |
+| `JVM_ARGS=${JVM_ARGS:--Xmx4G}` | `JVM_ARGS` honoured; **the `-Xmx4G` default is not** — see below. |
+| `LOGGING` else `$FUSEKI_HOME/log4j2.properties` | Same, plus a mounted `/fuseki/log4j2.properties` wins over the dist's. |
+| `MAIN=${MAIN:-serverUI}` and its name table | Same names, same classes, plus a fully-qualified class name. |
+| `JAVA` / `JAVA_HOME` | `JAVA` honoured; `JAVA_HOME` set in the image. |
+| server arguments (`--mem /ds`) | **Refused, loudly.** This image resolves config itself; see *The entrypoint*. |
+
+The official Apache container adds one more name of its own, `JAVA_OPTIONS`,
+which is read here too. `JAVA_OPTS` is read by neither and gets a warning, because
+someone who sets it and receives the default heap has no way to tell from outside.
+
+**The one deliberate deviation: no default heap size.** The dist script defaults to
+`-Xmx4G` and the official image to `-Xmx4096m -Xms4096m`. Both predate
+container-aware JVMs and both ignore the memory limit the container was actually
+given, which is how a 2GB container gets a 4GB heap and an OOM kill. With no
+arguments a modern JVM takes 25% of the container's limit and moves with it. Set
+`JVM_ARGS` to override, and the boot log says which applied either way:
+
+```
+[sp-fuseki] jvm args        -> (none) (unset — the JVM's container-aware default heap)
+[sp-fuseki] logging         -> -Dlog4j.configurationFile=/opt/fuseki/log4j2.properties (from the dist's …)
+[sp-fuseki] server class    -> org.apache.jena.fuseki.main.cmds.FusekiServerCmd (from FUSEKI_UI=on)
+```
 
 ### The admin API (`/$/…`)
 

@@ -875,6 +875,76 @@
           (is (str/includes? (str o e) "extra jars")
               "the extra directory is reported at boot, like every other decision"))))))
 
+
+;; ---------------------------------------------------------------------------
+;; 41-44. the dist script's own knobs
+;; ---------------------------------------------------------------------------
+
+(deftest s41-the-upstream-jvm-knobs-still-work
+  ;; This entrypoint replaced the dist's `fuseki-server` script, and for a while it
+  ;; honoured some of that script's knobs and silently dropped the rest. Nothing
+  ;; failed — the variables were still set and simply did nothing, which is the
+  ;; failure mode a drop-in image must not have.
+  ;;
+  ;; Asserted against /proc/1/cmdline rather than our log line, because the log is
+  ;; ours and the process is the truth.
+  (testing "JVM_ARGS reaches the JVM"
+    (with-container [cid {:env {"JVM_ARGS" "-Xmx512m"}}]
+      (wait-ping)
+      (let [argv (str (:out (docker "exec" cid "cat" "/proc/1/cmdline")))]
+        (is (str/includes? argv "-Xmx512m") "the flag must be on the real process, not just in our log")
+        (is (str/includes? argv "-cp") "and the launch goes through -cp, so extra/ can be appended"))))
+  (testing "JAVA_OPTIONS is read too — the official image's name for the same thing"
+    (with-container [cid {:env {"JAVA_OPTIONS" "-Xmx384m"}}]
+      (wait-ping)
+      (is (str/includes? (str (:out (docker "exec" cid "cat" "/proc/1/cmdline"))) "-Xmx384m"))))
+  (testing "and JVM_ARGS wins when both are set, because that is the script's name"
+    (let [out (boot-output {:env {"JVM_ARGS" "-Xmx256m" "JAVA_OPTIONS" "-Xmx777m"}})]
+      (is (str/includes? out "-Xmx256m"))
+      (is (not (str/includes? out "-Xmx777m")))
+      (is (str/includes? out "(JVM_ARGS)") "the log names which variable applied"))))
+
+(deftest s42-main-selects-the-server-posture
+  (testing "MAIN=plain gives the headless server"
+    (with-container [cid {:env {"MAIN" "plain"}}]
+      (wait-ping)
+      (is (str/includes? (str (:out (docker "exec" cid "cat" "/proc/1/cmdline")))
+                         "FusekiServerPlainCmd"))))
+  (testing "MAIN=serverui gives the class the dist script maps that name to"
+    (let [out (boot-output {:env {"MAIN" "serverui"}})]
+      (is (str/includes? out "FusekiServerUICmd"))))
+  (testing "an unknown MAIN is fatal, and the message lists what would have worked"
+    (let [out (boot-output {:env {"MAIN" "uii"}})]
+      (is (str/includes? out "FATAL"))
+      (is (str/includes? out "serverui"))
+      (is (not (str/includes? out "exec: java")) "nothing starts")))
+  (testing "MAIN wins over FUSEKI_UI and the loser is named"
+    (let [out (boot-output {:env {"MAIN" "plain" "FUSEKI_UI" "on"}})]
+      (is (str/includes? out "ignoring FUSEKI_UI=on")))))
+
+(deftest s43-logging-configuration-is-honoured
+  (testing "by default the dist's own log4j2.properties is used, so logs match upstream's"
+    (let [out (boot-output {})]
+      (is (str/includes? out "-Dlog4j.configurationFile=/opt/fuseki/log4j2.properties"))))
+  (testing "LOGGING is passed through whole, as the script does"
+    (let [out (boot-output {:env {"LOGGING" "-Dlog4j.configurationFile=/fuseki/mine.properties"}})]
+      (is (str/includes? out "/fuseki/mine.properties"))
+      (is (not (str/includes? out "/opt/fuseki/log4j2.properties")))))
+  (testing "a mounted log4j2.properties beats the dist's, with no variable set"
+    (let [f   (fixture "log4j2.properties" "status = error\nrootLogger.level = warn\n")
+          out (boot-output {:mounts [(str f ":/fuseki/log4j2.properties:ro")]})]
+      (is (str/includes? out "-Dlog4j.configurationFile=/fuseki/log4j2.properties")))))
+
+(deftest s44-a-variable-we-do-not-read-is-called-out
+  ;; JAVA_OPTS is what people set out of habit from other Java images. Neither the
+  ;; dist script nor the official container reads it, and someone who sets it and
+  ;; gets the default heap cannot tell from outside.
+  (let [out (boot-output {:env {"JAVA_OPTS" "-Xmx99m"}})]
+    (is (str/includes? out "JAVA_OPTS is not read by this image"))
+    (is (str/includes? out "JVM_ARGS") "and it names the ones that are")
+    (is (not (str/includes? out "-Xmx99m")) "and it is not quietly used anyway")))
+
+
 (defn -main [& _]
   (println (str "== sp-fuseki smoke: " image " =="))
   (let [{:keys [fail error test] :as summary} (run-tests 'smoke)]
