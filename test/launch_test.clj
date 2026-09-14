@@ -10,6 +10,7 @@
 
   Run: bash test/unit.sh"
   (:require [clojure.test :refer [deftest testing is]]
+            [babashka.fs :as fs]
             [clojure.string :as str]
             [sp-fuseki.launch :as l]))
 
@@ -145,3 +146,43 @@
 (deftest argv-omits-what-is-absent
   (is (= ["java" "-cp" "/f.jar" "some.Main"]
          (l/argv {:java "java" :jvm [] :logging nil :cp "/f.jar" :class "some.Main" :args []}))))
+
+;; ---------------------------------------------------------------------------
+;; Jars that are not on the classpath, and saying so
+;; ---------------------------------------------------------------------------
+;;
+;; `extra-dir` answering nil is correct and it is not a report. The failure it
+;; stands for — a jar the user put somewhere, that Fuseki will not load — ends as
+;; `ClassNotFoundException` naming a class that is sitting on disk, and the only
+;; clue in the boot log was a line that did not appear.
+
+(deftest extra-path-says-where-it-looked-even-when-nothing-is-there
+  (let [base (str (fs/create-temp-dir))]
+    (is (nil? (l/extra-dir base))
+        "no extra/ under base, so there is no classpath to extend")
+    (is (str/ends-with? (l/extra-path base) "/extra")
+        "and the path is still answerable — that is what the log line needs")))
+
+(deftest a-jar-in-a-near-miss-directory-is-reported
+  (let [base  (str (fs/create-temp-dir))
+        wrong (str (fs/create-temp-dir) "/extra")]
+    (fs/create-dirs wrong)
+    (spit (str wrong "/custom.jar") "not really a jar")
+    (let [found (l/misplaced-jars base [wrong])]
+      (is (= 1 (count found)) "one directory holds jars and is not the real one")
+      (is (= wrong (first (first found))))
+      (is (= 1 (count (second (first found))))))))
+
+(deftest the-real-directory-is-never-a-near-miss
+  (let [base (str (fs/create-temp-dir))]
+    (fs/create-dirs (l/extra-path base))
+    (spit (str (l/extra-path base) "/real.jar") "x")
+    (is (empty? (l/misplaced-jars base [(l/extra-path base)]))
+        "jars in the directory that IS read are not misplaced")))
+
+(deftest a-directory-that-does-not-exist-is-not-an-error
+  ;; `.listFiles` answers nil for a missing directory, which `jars-in` folds to an
+  ;; empty seq. Worth pinning: this walks paths that are absent on every machine
+  ;; that is not a Fuseki container, so throwing here would fire on every run.
+  (let [base (str (fs/create-temp-dir))]
+    (is (empty? (l/misplaced-jars base ["/definitely/not/here/extra"])))))
