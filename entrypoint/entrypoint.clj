@@ -507,9 +507,23 @@
           args    (launch/argv {:java java-bin :jvm (:args jvm) :logging (:arg log4j)
                                 :cp cp :class class
                                 :args [(str "--port=" port) (str "--config=" eff-cfg)]})]
-      (when extra
+      ;; BOTH WAYS, because every other decision here prints whichever way it went —
+      ;; `auth`, `ui`, `port` and `server class` all say "(from default)" rather than
+      ;; going quiet. This one printed only on success, so the signal that nothing was
+      ;; loaded was an ABSENT LINE, and a reader can only notice a line that is missing
+      ;; if they already know it should be there. Somebody debugging a
+      ;; ClassNotFoundException does not.
+      (if extra
         (log "extra jars      ->" extra
-             (str "(" (count (launch/jars-in extra)) " on the classpath)")))
+             (str "(" (count (launch/jars-in extra)) " on the classpath)"))
+        (log "extra jars      -> none at" (launch/extra-path base)))
+      ;; And jars somewhere plainly meant to be loaded, that will not be. `/fuseki/extra`
+      ;; is one path segment from correct: the COPY succeeds, the image builds, and the
+      ;; container dies naming a class that is sitting right there on disk. Nobody puts a
+      ;; jar in a directory by accident, so this is evidence of intent rather than noise.
+      (doseq [[d js] (launch/misplaced-jars base)]
+        (log "extra jars      -> WARNING:" (count js) "jar(s) in" d
+             "are NOT on the classpath —" (launch/extra-path base) "is the directory read"))
       (log "server class    ->" class (str "(from " from ")"))
       (when ignored
         (log "server class    -> ignoring" ignored "— MAIN is set and wins"))
