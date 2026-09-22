@@ -1,12 +1,25 @@
 name: upstream-check
 
-# Weekly: has Apache published a Fuseki newer than our default pin? If so, open
-# an issue telling us to bump + build. Renovate is the primary signal; this is
-# the belt-and-braces one — it also catches a Renovate outage or a muted PR.
+# Two questions on a timer, neither of which builds anything:
+#
+#   jena  — has Apache published a Fuseki newer than our pin?
+#   scan  — do the images we have ALREADY PUBLISHED now have fixable CVEs?
+#
+# The second exists because the CVE gate only ever ran at build time. Nothing
+# rebuilds on a schedule, by choice, so a published image rots quietly: `latest`
+# sat for a fortnight carrying three fixable HIGH findings in libpcre2 that the
+# gate would have failed on, and nothing was going to say so. The base image tag
+# floats, so the fix was already waiting in the registry — we simply never looked.
+#
+# DAILY, not weekly, and the distinction is deliberate: a scan is a minute of
+# hosted runner time and publishes nothing. A daily BUILD would republish
+# identical bytes under a new tag most days, which is the thing we removed.
+# Frequency here buys one thing only — how long a fix sits available while our
+# users run without it.
 
 on:
   schedule:
-    - cron: "23 7 * * 1"   # Mondays 07:23 UTC
+    - cron: "23 7 * * *"   # 07:23 UTC, daily
   workflow_dispatch:
 
 permissions:
@@ -95,3 +108,115 @@ jobs:
       - name: Up to date
         if: steps.check.outputs.newer != 'true'
         run: echo "pin ${{ steps.check.outputs.pinned }} is current (upstream latest ${{ steps.check.outputs.upstream }}) — no issue opened"
+
+  scan:
+    # The published images, not a fresh build. A build would pull today's base and
+    # come up clean while the thing our users are actually running stays broken —
+    # the question here is what is in the registry, not what we could make.
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE: ghcr.io/semantic-partners/sp-fuseki
+    steps:
+      - name: Which tags do people actually pull
+        id: tags
+        run: |
+          set -euo pipefail
+          # n=1000 because the default page is 100 and this registry already holds
+          # 157 tags — the first version of this silently scanned a page and never
+          # saw the jre legs at all.
+          TOKEN="$(curl -fsSL "https://ghcr.io/token?scope=repository:semantic-partners/sp-fuseki:pull&service=ghcr.io" | jq -r .token)"
+          ALL="$(curl -fsSL -H "Authorization: Bearer $TOKEN" \
+            "https://ghcr.io/v2/semantic-partners/sp-fuseki/tags/list?n=1000" | jq -r '.tags[]')"
+          [ -n "$ALL" ] || { echo "no tags returned — the registry or the token shape changed" >&2; exit 1; }
+          # An ALLOWLIST of the tags people deploy by name: latest, a Jena version,
+          # and a Jena version on a non-default JRE. Everything else in there is an
+          # immutable build — calver-stamped, the older run-numbered ones, pr-* and
+          # cosign's sha256-* signatures — and scanning those reports the same
+          # finding dozens of times about images nobody pulls. A denylist would let
+          # each new stamped format back in; this cannot.
+          TAGS="$(printf '%s\n' "$ALL" \
+            | grep -E '^latest$|^[0-9]+\.[0-9]+\.[0-9]+$|^[0-9]+\.[0-9]+\.[0-9]+-jre[0-9]+$' \
+            | sort -u)"
+          [ -n "$TAGS" ] || { echo "no moving tags matched — the tag scheme changed and this filter did not" >&2; exit 1; }
+          # $TAGS is a list, so the split is the point.
+          # shellcheck disable=SC2086
+          { echo "scanning:"; printf '  %s\n' $TAGS; }
+          # shellcheck disable=SC2086
+          echo "tags=$(printf '%s ' $TAGS)" >> "$GITHUB_OUTPUT"
+
+      - name: Scan each one for findings that HAVE a fix
+        id: scan
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          set -euo pipefail
+          # --ignore-unfixed, same as the build gate: an unfixed CVE is not an
+          # action, it is a subscription. This job exists to say "there is a fix
+          # and you are not running it".
+          : > /tmp/findings.md
+          TOTAL=0
+          for t in $TAGS; do
+            echo "== $IMAGE:$t"
+            docker run --rm aquasec/trivy:latest image --quiet --scanners vuln \
+              --severity HIGH,CRITICAL --ignore-unfixed --format json "$IMAGE:$t" > "/tmp/$t.json" || {
+                echo "::warning::trivy failed for $t — treating as unknown, not clean"; continue; }
+            N="$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' "/tmp/$t.json")"
+            echo "   $N fixable"
+            TOTAL=$((TOTAL + N))
+            if [ "$N" -gt 0 ]; then
+              {
+                echo "### \`$t\` — $N fixable"
+                echo
+                echo "| package | installed | fixed in | id |"
+                echo "|---|---|---|---|"
+                jq -r '[.Results[]?.Vulnerabilities // []] | flatten
+                       | sort_by(.PkgName) | .[]
+                       | "| \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion) | [\(.VulnerabilityID)](\(.PrimaryURL)) |"' \
+                  "/tmp/$t.json" | sort -u
+                echo
+              } >> /tmp/findings.md
+            fi
+          done
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          { echo "## Published images"; echo; [ "$TOTAL" -gt 0 ] && cat /tmp/findings.md || echo "No fixable HIGH or CRITICAL findings."; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, update or close the issue
+        env:
+          TOTAL: ${{ steps.scan.outputs.total }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="Published images have fixable HIGH/CRITICAL findings"
+          NUM="$(gh issue list --repo "$REPO" --state open --limit 100 \
+                 --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            # Closing it is the point. An issue that stays open after the fix
+            # ships is how a tracker stops being read.
+            if [ -n "$NUM" ]; then
+              gh issue close "$NUM" --repo "$REPO" \
+                --comment "Clean as of $(date -u +%Y-%m-%d): no fixable HIGH or CRITICAL findings in the published images."
+              echo "closed #$NUM"
+            else
+              echo "clean, and nothing open"
+            fi
+            exit 0
+          fi
+
+          {
+            echo "Trivy found **$TOTAL** fixable HIGH/CRITICAL findings in images that are published right now."
+            echo
+            echo "Fixable means the fix exists and our users are not running it. The base image tag floats, so"
+            echo "a rebuild usually picks it up with no source change: run the build workflow on \`main\`."
+            echo
+            cat /tmp/findings.md
+            echo "_Checked $(date -u +%Y-%m-%d\ %H:%M) UTC. This issue closes itself when a scan comes back clean._"
+          } > /tmp/body.md
+
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --repo "$REPO" --body-file /tmp/body.md
+            echo "updated #$NUM"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --label security --body-file /tmp/body.md
+          fi
