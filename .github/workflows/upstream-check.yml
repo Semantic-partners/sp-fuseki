@@ -218,5 +218,9 @@ jobs:
             gh issue edit "$NUM" --repo "$REPO" --body-file /tmp/body.md
             echo "updated #$NUM"
           else
-            gh issue create --repo "$REPO" --title "$TITLE" --label security --body-file /tmp/body.md
+            # --label is best-effort: a missing label must not swallow the finding.
+            # The first run died exactly here, with the scan already done and the
+            # CVEs already known, because the label did not exist yet.
+            gh issue create --repo "$REPO" --title "$TITLE" --label security --body-file /tmp/body.md \
+              || gh issue create --repo "$REPO" --title "$TITLE" --body-file /tmp/body.md
           fi
