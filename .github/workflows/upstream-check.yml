@@ -114,6 +114,10 @@ jobs:
     # come up clean while the thing our users are actually running stays broken —
     # the question here is what is in the registry, not what we could make.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      actions: write      # to start the rebuild that IS the fix
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       IMAGE: ghcr.io/semantic-partners/sp-fuseki
@@ -179,6 +183,15 @@ jobs:
             fi
           done
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          # A fingerprint of WHAT was found, not how much. It decides whether a
+          # rebuild is worth attempting: the same finding-set two days running
+          # means the last rebuild did not clear it, and doing it again just
+          # republishes identical bytes under a new tag every morning.
+          FP="$(cat /tmp/*.json 2>/dev/null \
+                | jq -r '[.Results[]?.Vulnerabilities // []] | flatten | .[] | "\(.VulnerabilityID):\(.FixedVersion)"' \
+                | sort -u | sha256sum | cut -c1-12)"
+          echo "fingerprint=$FP" >> "$GITHUB_OUTPUT"
+          echo "finding fingerprint: $FP"
           { echo "## Published images"; echo; [ "$TOTAL" -gt 0 ] && cat /tmp/findings.md || echo "No fixable HIGH or CRITICAL findings."; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open, update or close the issue
@@ -212,7 +225,27 @@ jobs:
             echo
             cat /tmp/findings.md
             echo "_Checked $(date -u +%Y-%m-%d\ %H:%M) UTC. This issue closes itself when a scan comes back clean._"
+            echo "<!-- fingerprint:$FP -->"
           } > /tmp/body.md
+
+          # THE FIX IS A REBUILD. Not a code change, not a version bump: the base
+          # image tag floats, the patched package is already in the registry, and
+          # a rebuild picks it up. So trigger one — but only once per finding-set.
+          # If the same fingerprint comes back tomorrow, the rebuild did not clear
+          # it (the base image has not shipped the fix yet) and repeating it would
+          # republish identical bytes under a new tag every morning.
+          PREV=""
+          [ -n "$NUM" ] && PREV="$(gh issue view "$NUM" --repo "$REPO" --json body --jq '.body' \
+                                   | sed -n 's/.*<!-- fingerprint:\([a-f0-9]*\) -->.*/\1/p' | head -1)"
+          if [ "$PREV" = "$FP" ]; then
+            echo "same findings as the last run ($FP) — a rebuild did not clear them, not repeating it"
+            REBUILD="no — unchanged since the last attempt"
+          else
+            gh workflow run build.yml --repo "$REPO" --ref main
+            echo "dispatched a rebuild on main"
+            REBUILD="yes — dispatched $(date -u +%H:%M) UTC"
+          fi
+          sed -i "s|_Checked |_Rebuild: $REBUILD. Checked |" /tmp/body.md
 
           if [ -n "$NUM" ]; then
             gh issue edit "$NUM" --repo "$REPO" --body-file /tmp/body.md
