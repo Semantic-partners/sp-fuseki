@@ -109,6 +109,67 @@ jobs:
         if: steps.check.outputs.newer != 'true'
         run: echo "pin ${{ steps.check.outputs.pinned }} is current (upstream latest ${{ steps.check.outputs.upstream }}) — no issue opened"
 
+  temurin:
+    # The pin nothing else watches. Dependabot cannot see it — it is a string in
+    # a RUN, not a FROM — and Trivy cannot either: it reads jars, and a JRE's
+    # lib/modules is not one. So the JVM is both unmanaged and unscanned, which is
+    # how ours reached four quarterly security updates behind without a word.
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the Temurin pin against Adoptium
+        id: check
+        run: |
+          set -euo pipefail
+          PINNED="$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)"
+          [ -n "$PINNED" ] || { echo "could not read ARG TEMURIN_VERSION from image/Dockerfile" >&2; exit 1; }
+          MAJOR="${PINNED%%[.+]*}"
+          # The same feature version we pin, so this reports a security update
+          # rather than nagging about the next Java release. Moving major is a
+          # decision; moving point releases is hygiene.
+          LATEST="$(curl -fsSL --retry 3 --retry-delay 5 \
+            "https://api.adoptium.net/v3/assets/latest/${MAJOR}/hotspot?image_type=jre&architecture=x64&os=linux" \
+            | jq -r '.[0].release_name // empty' | sed 's/^jdk-//')"
+          [ -n "$LATEST" ] || { echo "Adoptium returned no release for ${MAJOR} — API shape changed" >&2; exit 1; }
+          {
+            echo "pinned=$PINNED"
+            echo "latest=$LATEST"
+            echo "major=$MAJOR"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "behind=no" >> "$GITHUB_OUTPUT"
+            echo "Temurin $MAJOR pin $PINNED is current"
+          else
+            echo "behind=yes" >> "$GITHUB_OUTPUT"
+            echo "Temurin $MAJOR: pinned $PINNED, current $LATEST"
+          fi
+
+      - name: Open (or reuse) the bump issue
+        if: steps.check.outputs.behind == 'yes'
+        env:
+          PINNED: ${{ steps.check.outputs.pinned }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          MAJOR: ${{ steps.check.outputs.major }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="Temurin ${MAJOR}: pin is ${PINNED}, current is ${LATEST}"
+          # Title carries both versions, so a new release makes a NEW issue rather
+          # than silently editing one someone already read and closed.
+          EXISTING="$(gh issue list --repo "$REPO" --state open --limit 100 \
+                      --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
+          if [ -n "$EXISTING" ]; then echo "already open as #$EXISTING"; exit 0; fi
+          {
+            # shellcheck disable=SC2016  # backticks are markdown; values arrive as printf args
+            printf '`image/Dockerfile` pins `ARG TEMURIN_VERSION=%s`. Adoptium ships `%s`.\n\n' "$PINNED" "$LATEST"
+            printf 'Temurin point releases are quarterly security updates, so a stale pin means a JVM with known fixes missing.\n\n'
+            printf 'Nothing else catches this. Dependabot cannot parse the ARG — it is a string in a RUN, not a FROM. Trivy reads jars, and a JRE lib/modules is not one.\n\n'
+            printf 'Bump the ARG and let CI rebuild. If EXTRA_JRE names a version of this same feature release, bump that too.\n'
+          } > /tmp/temurin.md
+          gh issue create --repo "$REPO" --title "$TITLE" --label upstream --body-file /tmp/temurin.md
   scan:
     # The published images, not a fresh build. A build would pull today's base and
     # come up clean while the thing our users are actually running stays broken —

@@ -1,0 +1,41 @@
+# Dependabot: the native, deterministic half of dependency watching.
+#
+# It covers what it can parse — the base image in a FROM line, and the actions
+# pinned in workflows. It cannot see our ARG pins (Jena, Temurin, babashka),
+# because those are strings in a RUN and no ecosystem owns them. Those are
+# watched by .github/workflows/upstream-check.yml instead.
+#
+# Why this file exists at all: renovate.json has been in this repo for months
+# and the Renovate app was never installed, so nothing read it. Dependabot needs
+# no app and no token — checking this in turns it on.
+
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /image
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 3
+    groups:
+      # One PR for routine action bumps. Ten separate PRs for ten actions is how
+      # a dependency bot gets muted.
+      actions:
+        patterns: ["*"]
