@@ -197,6 +197,7 @@ jobs:
       - name: Open, update or close the issue
         env:
           TOTAL: ${{ steps.scan.outputs.total }}
+          FP: ${{ steps.scan.outputs.fingerprint }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
