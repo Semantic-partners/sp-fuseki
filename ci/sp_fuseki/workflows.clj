@@ -470,8 +470,11 @@
                          :severity "HIGH,CRITICAL"))
 
              ;; The full picture, unfixable included, as a report. Never blocks.
+             ;; Runs on PRs too: the main ruleset blocks a merge until code
+             ;; scanning has a Trivy analysis for the PR's commit, so a report
+             ;; that only exists after merge deadlocks every PR.
              (m :name "Trivy — full report (SARIF)"
-                :if (str not-pr " && always()")
+                :if "always()"
                 :uses "aquasecurity/trivy-action@v0.36.0"
                 :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")
                          :format "sarif"
@@ -480,7 +483,7 @@
                          :severity "HIGH,CRITICAL"))
              ;; Readable today, on a private repo, with no Advanced Security.
              (m :name "Keep the report"
-                :if (str not-pr " && always()")
+                :if "always()"
                 :uses "actions/upload-artifact@v7"
                 :with (m :name "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}"
                          :path "trivy.sarif"
@@ -491,7 +494,7 @@
              ;; failing. Not continue-on-error: a step expected to fail is the kind
              ;; of decoration this change exists to delete.
              (m :name "Upload to code scanning (public repos only)"
-                :if (str not-pr " && always() && github.event.repository.private == false")
+                :if "always() && github.event.repository.private == false"
                 :uses "github/codeql-action/upload-sarif@v4"
                 :with (m :sarif_file "trivy.sarif"
                          :category (str "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}")))

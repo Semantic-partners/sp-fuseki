@@ -217,7 +217,12 @@ RUN set -eux; \
 FROM debian:bookworm-slim
 
 # curl stays in the final image — the HEALTHCHECK uses it.
+#
+# `upgrade` because the bookworm-slim tag lags Debian security by days. Trivy
+# failed a build on a libssl3 fix that was already in the archive but not yet in
+# the tag. Without it, a rebuild only takes fixes for packages we install here.
 RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
