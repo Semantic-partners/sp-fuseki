@@ -2,9 +2,9 @@
 
 Clean, **config-respecting**, **legible** Apache Jena Fuseki Docker images.
 
-[![build](https://github.com/Semantic-partners/sp-fuseki/workflows/build/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/build.yml)
-[![lint](https://github.com/Semantic-partners/sp-fuseki/workflows/lint/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/lint.yml)
-[![upstream-check](https://github.com/Semantic-partners/sp-fuseki/workflows/upstream-check/badge.svg)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/upstream-check.yml)
+[![build](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/build.yml)
+[![lint](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/lint.yml)
+[![upstream-check](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/upstream-check.yml/badge.svg)](https://github.com/Semantic-partners/sp-fuseki/actions/workflows/upstream-check.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-informational)
 ![signed](https://img.shields.io/badge/images-cosign%20signed-informational)
