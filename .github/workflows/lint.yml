@@ -19,7 +19,7 @@ jobs:
   actionlint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # build.yml is generated from ci/sp_fuseki/workflows.clj. The pre-commit hook
       # regenerates it, but a hook is local — fork contributors don't have it — so
       # this is the backstop that catches a stale committed artefact.

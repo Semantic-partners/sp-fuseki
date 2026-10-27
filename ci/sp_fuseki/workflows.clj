@@ -168,7 +168,7 @@
                  :jres "${{ steps.p.outputs.jres }}"
                  :build "${{ steps.p.outputs.build }}"
                  :image "${{ steps.p.outputs.image }}")
-     :steps [(m :uses "actions/checkout@v4")
+     :steps [(m :uses "actions/checkout@v7")
              (m :id "p"
                 :run (str "set -euo pipefail\n"
                           "DEF=\"$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)\"\n"
@@ -214,10 +214,10 @@
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
                   :matrix (m :jena jena-matrix :jre jre-matrix :arch arches-matrix))
-     :steps [(m :uses "actions/checkout@v4")
-             (m :uses "docker/setup-buildx-action@v3")
+     :steps [(m :uses "actions/checkout@v7")
+             (m :uses "docker/setup-buildx-action@v4")
              (m :name "Build (native, load)"
-                :uses "docker/build-push-action@v6"
+                :uses "docker/build-push-action@v7"
                 :with (m :context "."
                          :file "image/Dockerfile"
                          :load true
@@ -290,13 +290,13 @@
      :strategy (m :fail-fast false
                   :matrix (m :jena jena-matrix :jre jre-matrix :arch arches-matrix))
      :permissions (m :contents "read" :packages "write")
-     :steps [(m :uses "actions/checkout@v4")
+     :steps [(m :uses "actions/checkout@v7")
              isolate-docker-step
-             (m :uses "docker/setup-buildx-action@v3")
+             (m :uses "docker/setup-buildx-action@v4")
              write-auth-step
              (m :name "Build + push by digest"
                 :id "build"
-                :uses "docker/build-push-action@v6"
+                :uses "docker/build-push-action@v7"
                 :with (m :context "."
                          :file "image/Dockerfile"
                          :platforms "linux/${{ matrix.arch }}"
@@ -312,7 +312,7 @@
                 :run (str "set -euo pipefail\n"
                           "mkdir -p /tmp/digests\n"
                           "echo \"${{ steps.build.outputs.digest }}\" > \"/tmp/digests/${{ matrix.arch }}\"\n"))
-             (m :uses "actions/upload-artifact@v4"
+             (m :uses "actions/upload-artifact@v7"
                 :with (m :name "digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}"
                          :path "/tmp/digests/*"
                          :retention-days 1
@@ -360,11 +360,11 @@
      :permissions (m :contents "read" :packages "write" :id-token "write"
                      ;; for the code-scanning upload
                      :security-events "write")
-     :steps [(m :uses "actions/download-artifact@v4"
+     :steps [(m :uses "actions/download-artifact@v8"
                 :with (m :pattern "digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-*"
                          :merge-multiple true
                          :path "/tmp/digests"))
-             (m :uses "docker/setup-buildx-action@v3")
+             (m :uses "docker/setup-buildx-action@v4")
              ;; Not sigstore/cosign-installer. It single-shots a GitHub release
              ;; download, which failed this pipeline twice — exit 56 (connection
              ;; reset) and exit 22 (HTTP error) — and GitHub release fetches have
@@ -390,13 +390,13 @@
                           "mkdir -p \"$RUNNER_TEMP/bin\"\n"
                           "mv \"$RUNNER_TEMP/cosign\" \"$RUNNER_TEMP/bin/cosign\"\n"
                           "echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"))
-             (m :uses "docker/login-action@v3"
+             (m :uses "docker/login-action@v4"
                 :with (m :registry "${{ env.REGISTRY }}"
                          :username "${{ github.actor }}"
                          :password "${{ secrets.GITHUB_TOKEN }}"))
              (m :name "Metadata / two-axis tags"
                 :id "meta"
-                :uses "docker/metadata-action@v5"
+                :uses "docker/metadata-action@v6"
                 :with (m :images image :tags tag-lines))
              (m :name "Create the manifest list"
                 :id "merge"
@@ -484,7 +484,7 @@
              ;; Readable today, on a private repo, with no Advanced Security.
              (m :name "Keep the report"
                 :if "always()"
-                :uses "actions/upload-artifact@v4"
+                :uses "actions/upload-artifact@v7"
                 :with (m :name "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}"
                          :path "trivy.sarif"
                          :retention-days 30
@@ -495,7 +495,7 @@
              ;; of decoration this change exists to delete.
              (m :name "Upload to code scanning (public repos only)"
                 :if "always() && github.event.repository.private == false"
-                :uses "github/codeql-action/upload-sarif@v3"
+                :uses "github/codeql-action/upload-sarif@v4"
                 :with (m :sarif_file "trivy.sarif"
                          :category (str "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}")))
              (m :name "Sign image (cosign keyless)"
