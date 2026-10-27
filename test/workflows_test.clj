@@ -413,3 +413,12 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no pin for"
         (w/action "nobody/nothing")))
   (is (= "nobody/nothing@v1" (w/action "nobody/nothing" "v1"))))
+
+(deftest build-ok-stands-for-every-job
+  ;; The ruleset requires build-ok alone. A job it doesn't need is a job that can
+  ;; go red and still merge.
+  (let [ok (job :build-ok)]
+    (is (= (set (remove #{:build-ok} (keys (:jobs wf))))
+           (set (map keyword (:needs ok)))))
+    (testing "and it runs when a need failed, or a skip would read as a pass"
+      (is (= "always()" (:if ok))))))
