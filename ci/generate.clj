@@ -11,7 +11,7 @@
 (require '[babashka.fs :as fs]
          '[sp-fuseki.workflows :as wf])
 
-(def target ".github/workflows/build.yml")
+(def target wf/target)
 
 (let [want (wf/->yaml wf/build-workflow)
       check? (contains? (set *command-line-args*) "--check")

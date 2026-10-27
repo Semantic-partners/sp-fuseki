@@ -383,3 +383,33 @@
       (is (str/includes? out "bb ci/generate.clj")))
     (testing "'on' is quoted so YAML 1.1 can't read it as boolean true"
       (is (str/includes? out "'on':")))))
+
+;; ---------------------------------------------------------------------------
+;; Action pins live in build.yml, because that is the file Dependabot edits.
+;; ---------------------------------------------------------------------------
+
+(defn- pins-from [yaml-text]
+  (let [f (java.io.File/createTempFile "pins" ".yml")]
+    (try (spit f yaml-text) (w/read-pins (str f))
+         (finally (.delete f)))))
+
+(deftest every-action-is-pinned
+  (doseq [[jid j] (:jobs wf)
+          {:keys [uses]} (:steps j)
+          :when uses]
+    (is (re-find #"@v[0-9]" uses) (str jid ": " uses " has no version"))))
+
+(deftest pins-come-from-the-yaml
+  (is (= {"actions/checkout" "v9" "docker/login-action" "v4"}
+         (pins-from "jobs:\n  a:\n    steps:\n    - uses: actions/checkout@v9\n    - uses: docker/login-action@v4\n  b:\n    steps:\n    - uses: actions/checkout@v9\n")))
+  (testing "a half-applied bump refuses rather than picking one"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"actions/checkout at v7, v8"
+          (pins-from "jobs:\n  a:\n    steps:\n    - uses: actions/checkout@v7\n    - uses: actions/checkout@v8\n")))))
+
+(deftest a-seed-is-only-for-a-new-action
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Drop the version"
+        (w/action "actions/checkout" "v1"))
+      "a version in the source next to a pin in build.yml is two copies")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no pin for"
+        (w/action "nobody/nothing")))
+  (is (= "nobody/nothing@v1" (w/action "nobody/nothing" "v1"))))

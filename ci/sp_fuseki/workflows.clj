@@ -36,6 +36,55 @@
   (apply array-map kvs))
 
 ;; ---------------------------------------------------------------------------
+;; Action pins
+;; ---------------------------------------------------------------------------
+
+(def target ".github/workflows/build.yml")
+
+(defn read-pins
+  "{\"actions/checkout\" \"v7\" ...} from the `uses:` lines of a workflow file.
+
+  The one thing the generated YAML owns. Dependabot can parse workflow files and
+  nothing else, so a bump arrives as an edit to build.yml. Writing versions here
+  too made every Dependabot PR fail the drift check; reading them back means a
+  regeneration keeps the bump instead."
+  [path]
+  (if-not (.exists (java.io.File. path))
+    {}
+    (let [pairs (->> (yaml/parse-string (slurp path))
+                     (tree-seq coll? seq)
+                     (keep #(when (map? %) (:uses %)))
+                     (filter #(str/includes? % "@"))
+                     (map #(str/split % #"@" 2))
+                     distinct)]
+      (doseq [[action vs] (group-by first pairs)
+              :when (> (count vs) 1)]
+        (throw (ex-info (str path " pins " action " at " (str/join ", " (map second vs))
+                             " — one version per action") {})))
+      (into {} pairs))))
+
+(def pins (read-pins target))
+
+(defn action
+  "`owner/repo@version`, with the version taken from build.yml.
+
+  A new action has no pin yet, so give it one here — `(action \"x/y\" \"v1\")` —
+  regenerate, then drop it: once build.yml carries a pin, a version here is a
+  second copy, and generation refuses it."
+  ([name] (action name nil))
+  ([name seed]
+   (let [pinned (pins name)]
+     (cond
+       (and pinned seed)
+       (throw (ex-info (str name " is pinned in " target " (" pinned "). "
+                            "Drop the version from (action " (pr-str name) " ...).") {}))
+       pinned (str name "@" pinned)
+       seed (str name "@" seed)
+       :else
+       (throw (ex-info (str "no pin for " name " in " target ". "
+                            "Seed it: (action " (pr-str name) " \"v1\"), regenerate, then drop the seed.") {}))))))
+
+;; ---------------------------------------------------------------------------
 ;; Runners
 ;; ---------------------------------------------------------------------------
 
@@ -75,9 +124,8 @@
 
 (def not-pr "github.event_name != 'pull_request'")
 
-;; Pinned here rather than in the generated YAML: a Renovate PR editing
-;; build.yml directly would be reverted by the next regeneration AND fail the
-;; drift check. Generated files must never be a bot's target — the source is.
+;; Pinned here, not in the YAML: cosign is a version string inside a `run:`,
+;; which Dependabot cannot see. Action pins go the other way — see `action`.
 ;; renovate: datasource=github-releases depName=sigstore/cosign extractVersion=^v(?<version>.*)$
 (def cosign-version "2.5.2")
 
@@ -168,7 +216,7 @@
                  :jres "${{ steps.p.outputs.jres }}"
                  :build "${{ steps.p.outputs.build }}"
                  :image "${{ steps.p.outputs.image }}")
-     :steps [(m :uses "actions/checkout@v7")
+     :steps [(m :uses (action "actions/checkout"))
              (m :id "p"
                 :run (str "set -euo pipefail\n"
                           "DEF=\"$(sed -n 's/^ARG JENA_VERSION=//p' image/Dockerfile | head -1)\"\n"
@@ -214,10 +262,10 @@
      :runs-on (runner-for "matrix.arch")
      :strategy (m :fail-fast false
                   :matrix (m :jena jena-matrix :jre jre-matrix :arch arches-matrix))
-     :steps [(m :uses "actions/checkout@v7")
-             (m :uses "docker/setup-buildx-action@v4")
+     :steps [(m :uses (action "actions/checkout"))
+             (m :uses (action "docker/setup-buildx-action"))
              (m :name "Build (native, load)"
-                :uses "docker/build-push-action@v7"
+                :uses (action "docker/build-push-action")
                 :with (m :context "."
                          :file "image/Dockerfile"
                          :load true
@@ -290,13 +338,13 @@
      :strategy (m :fail-fast false
                   :matrix (m :jena jena-matrix :jre jre-matrix :arch arches-matrix))
      :permissions (m :contents "read" :packages "write")
-     :steps [(m :uses "actions/checkout@v7")
+     :steps [(m :uses (action "actions/checkout"))
              isolate-docker-step
-             (m :uses "docker/setup-buildx-action@v4")
+             (m :uses (action "docker/setup-buildx-action"))
              write-auth-step
              (m :name "Build + push by digest"
                 :id "build"
-                :uses "docker/build-push-action@v7"
+                :uses (action "docker/build-push-action")
                 :with (m :context "."
                          :file "image/Dockerfile"
                          :platforms "linux/${{ matrix.arch }}"
@@ -312,7 +360,7 @@
                 :run (str "set -euo pipefail\n"
                           "mkdir -p /tmp/digests\n"
                           "echo \"${{ steps.build.outputs.digest }}\" > \"/tmp/digests/${{ matrix.arch }}\"\n"))
-             (m :uses "actions/upload-artifact@v7"
+             (m :uses (action "actions/upload-artifact")
                 :with (m :name "digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}"
                          :path "/tmp/digests/*"
                          :retention-days 1
@@ -360,11 +408,11 @@
      :permissions (m :contents "read" :packages "write" :id-token "write"
                      ;; for the code-scanning upload
                      :security-events "write")
-     :steps [(m :uses "actions/download-artifact@v8"
+     :steps [(m :uses (action "actions/download-artifact")
                 :with (m :pattern "digest-${{ matrix.jena }}-jre${{ matrix.jre.major }}-*"
                          :merge-multiple true
                          :path "/tmp/digests"))
-             (m :uses "docker/setup-buildx-action@v4")
+             (m :uses (action "docker/setup-buildx-action"))
              ;; Not sigstore/cosign-installer. It single-shots a GitHub release
              ;; download, which failed this pipeline twice — exit 56 (connection
              ;; reset) and exit 22 (HTTP error) — and GitHub release fetches have
@@ -390,13 +438,13 @@
                           "mkdir -p \"$RUNNER_TEMP/bin\"\n"
                           "mv \"$RUNNER_TEMP/cosign\" \"$RUNNER_TEMP/bin/cosign\"\n"
                           "echo \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"))
-             (m :uses "docker/login-action@v4"
+             (m :uses (action "docker/login-action")
                 :with (m :registry "${{ env.REGISTRY }}"
                          :username "${{ github.actor }}"
                          :password "${{ secrets.GITHUB_TOKEN }}"))
              (m :name "Metadata / two-axis tags"
                 :id "meta"
-                :uses "docker/metadata-action@v6"
+                :uses (action "docker/metadata-action")
                 :with (m :images image :tags tag-lines))
              (m :name "Create the manifest list"
                 :id "merge"
@@ -459,7 +507,7 @@
                           "done\n"))
 
              (m :name "Trivy — fail only on vulnerabilities that HAVE a fix"
-                :uses "aquasecurity/trivy-action@v0.36.0"
+                :uses (action "aquasecurity/trivy-action")
                 :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")
                          :format "table"
                          ;; The whole gate: a patch exists and we are still shipping
@@ -475,7 +523,7 @@
              ;; that only exists after merge deadlocks every PR.
              (m :name "Trivy — full report (SARIF)"
                 :if "always()"
-                :uses "aquasecurity/trivy-action@v0.36.0"
+                :uses (action "aquasecurity/trivy-action")
                 :with (m :image-ref (str image "@${{ steps.merge.outputs.digest }}")
                          :format "sarif"
                          :output "trivy.sarif"
@@ -484,7 +532,7 @@
              ;; Readable today, on a private repo, with no Advanced Security.
              (m :name "Keep the report"
                 :if "always()"
-                :uses "actions/upload-artifact@v7"
+                :uses (action "actions/upload-artifact")
                 :with (m :name "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}"
                          :path "trivy.sarif"
                          :retention-days 30
@@ -495,7 +543,7 @@
              ;; of decoration this change exists to delete.
              (m :name "Upload to code scanning (public repos only)"
                 :if "always() && github.event.repository.private == false"
-                :uses "github/codeql-action/upload-sarif@v4"
+                :uses (action "github/codeql-action/upload-sarif")
                 :with (m :sarif_file "trivy.sarif"
                          :category (str "trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}")))
              (m :name "Sign image (cosign keyless)"
@@ -605,7 +653,9 @@
 ;; ---------------------------------------------------------------------------
 
 (def header
-  (str "# GENERATED by ci/sp_fuseki/workflows.clj — DO NOT EDIT.\n"
+  (str "# GENERATED by ci/sp_fuseki/workflows.clj — DO NOT EDIT, except the\n"
+       "# version on a `uses:` line. Those are read back from this file, so\n"
+       "# Dependabot bumps survive regeneration.\n"
        "#\n"
        "# Edit the Clojure and regenerate (the pre-commit hook does it for you):\n"
        "#   bb ci/generate.clj\n"
