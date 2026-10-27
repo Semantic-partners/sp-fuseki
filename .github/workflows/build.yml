@@ -283,7 +283,7 @@ jobs:
         exit-code: '1'
         severity: HIGH,CRITICAL
     - name: Trivy — full report (SARIF)
-      if: github.event_name != 'pull_request' && always()
+      if: always()
       uses: aquasecurity/trivy-action@v0.36.0
       with:
         image-ref: ${{ needs.plan.outputs.image }}@${{ steps.merge.outputs.digest }}
@@ -292,7 +292,7 @@ jobs:
         exit-code: '0'
         severity: HIGH,CRITICAL
     - name: Keep the report
-      if: github.event_name != 'pull_request' && always()
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: trivy-${{ matrix.jena }}-jre${{ matrix.jre.major }}
@@ -300,7 +300,7 @@ jobs:
         retention-days: 30
         if-no-files-found: warn
     - name: Upload to code scanning (public repos only)
-      if: github.event_name != 'pull_request' && always() && github.event.repository.private == false
+      if: always() && github.event.repository.private == false
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: trivy.sarif

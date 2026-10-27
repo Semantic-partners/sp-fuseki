@@ -146,14 +146,20 @@
         (is (str/includes? cond- "github.event_name != 'pull_request'"))))))
 
 (deftest publishing-side-effects-stay-off-prs
-  ;; The REPORT and the SIGNATURE are side effects of publishing a release, so
-  ;; they stay off PRs. The scan GATE is not a side effect — it's feedback, and it
-  ;; deliberately runs on PRs (see trivy-blocks-only-on-fixable-findings).
-  (doseq [[needle desc] [["full report" "the SARIF report"]
-                         ["cosign sign" "signing"]]]
+  ;; The SIGNATURE is a side effect of publishing a release, so it stays off PRs.
+  ;; The scan GATE is feedback and runs on PRs (see
+  ;; trivy-blocks-only-on-fixable-findings).
+  (let [s (step-named :merge "cosign sign")]
+    (is (some? s))
+    (is (str/includes? (:if s) w/not-pr) "signing should be gated to non-PR events")))
+
+(deftest code-scanning-sees-prs
+  ;; The main ruleset waits for a Trivy analysis on the PR's commit. Gate the
+  ;; report or its upload to non-PR events and no PR can ever merge.
+  (doseq [needle ["full report" "Keep the report" "code scanning"]]
     (let [s (step-named :merge needle)]
       (is (some? s) (str "no step matching " needle))
-      (is (str/includes? (:if s) w/not-pr) (str desc " should be gated to non-PR events")))))
+      (is (not (str/includes? (:if s) w/not-pr)) (str needle " must run on PRs")))))
 
 (deftest no-job-can-land-on-a-self-hosted-runner
   ;; The property that replaced a whole routing mechanism. arm64 used to run on our
