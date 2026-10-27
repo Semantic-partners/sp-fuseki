@@ -314,3 +314,19 @@ jobs:
         DIGEST: ${{ steps.merge.outputs.digest }}
       run: |
         cosign sign --yes "${IMG}@${DIGEST}"
+  build-ok:
+    needs:
+    - plan
+    - test
+    - publish
+    - merge
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job succeeded
+      env:
+        NEEDS: ${{ toJSON(needs) }}
+      run: |
+        set -euo pipefail
+        jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+        jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" >/dev/null

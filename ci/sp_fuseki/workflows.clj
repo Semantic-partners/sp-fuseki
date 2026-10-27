@@ -551,6 +551,24 @@
                 :env (m :IMG image :DIGEST "${{ steps.merge.outputs.digest }}")
                 :run "cosign sign --yes \"${IMG}@${DIGEST}\"\n")]))
 
+(def build-ok-job
+  ;; The one check the main ruleset requires. Requiring the real jobs means
+  ;; naming them, and their names carry the matrix — `merge (6.2.0, 21.0.5+11,
+  ;; 21, true)` — so every Jena or JRE bump would leave the ruleset waiting on a
+  ;; check that no longer exists. This name never changes.
+  ;;
+  ;; `always()` because a job whose needs failed is SKIPPED, and a required check
+  ;; that is skipped counts as passing. Skipped needs fail here: on a fork PR that
+  ;; means red, which is fine — forks can't publish, so they can't merge either.
+  (m :needs ["plan" "test" "publish" "merge"]
+     :if "always()"
+     :runs-on hosted
+     :steps [(m :name "Every job succeeded"
+                :env (m :NEEDS "${{ toJSON(needs) }}")
+                :run (str "set -euo pipefail\n"
+                          "jq -r 'to_entries[] | \"\\(.key): \\(.value.result)\"' <<< \"$NEEDS\"\n"
+                          "jq -e 'all(.[]; .result == \"success\")' <<< \"$NEEDS\" >/dev/null\n"))]))
+
 (def build-workflow
   (m :name "build"
      :on (m :push (m :branches ["main"] :tags ["v*"])
@@ -565,7 +583,8 @@
      :jobs (m :plan plan-job
               :test test-job
               :publish publish-job
-              :merge merge-job)))
+              :merge merge-job
+              :build-ok build-ok-job)))
 
 ;; ---------------------------------------------------------------------------
 ;; Validation — the failures above, made impossible rather than caught late
