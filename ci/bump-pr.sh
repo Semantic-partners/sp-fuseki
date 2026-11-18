@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Open, or keep, the PR that moves one ARG pin in image/Dockerfile.
+# Open, or keep, the PR that moves one ARG pin in image/Dockerfile, plus any
+# change the caller already made under image/ (the KEYS file for a KEYS bump).
 # Called by .github/workflows/upstream-check.yml from a checkout of main.
 #
 #   ci/bump-pr.sh ARG FROM TO PREFIX TITLE BODY_FILE [ISSUE_TITLE_REGEX]
@@ -34,7 +35,8 @@ else
   grep -qx "ARG ${ARG}=${TO}" image/Dockerfile \
     || { echo "could not set ARG ${ARG}=${TO} in image/Dockerfile" >&2; exit 1; }
   git switch -q -c "$BRANCH"
-  git add image/Dockerfile
+  # image/, not just the Dockerfile: a KEYS bump changes image/jena-KEYS too.
+  git add image/
   git -c user.name='github-actions[bot]' \
       -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
       commit -q -m "$TITLE"

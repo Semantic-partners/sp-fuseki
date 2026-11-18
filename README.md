@@ -634,9 +634,9 @@ signature at all. Full detail under [Publishing](#publishing).
 
 One asymmetry worth stating here rather than leaving in the Dockerfile: the JRE's
 public key comes from a keyserver, so key and artifact travel different channels.
-Apache serves `KEYS` from the same host as the tarball, so anyone who owns that
-host owns both — and **the pinned fingerprint is the only thing standing there**.
-It is doing more work in the Fuseki case than in the JRE one.
+Apache serves `KEYS` from the same host as the tarball, so the build does not
+fetch it: `image/jena-KEYS` is a copy pinned by sha256, and upstream-check opens a
+PR when Apache's copy changes. The pinned fingerprint still does the deciding.
 
 ## Build & test locally
 
@@ -783,7 +783,8 @@ checksum-only rather than quietly appearing verified.
 There is no cron — builds run on bumps.
 [upstream-check.yml](.github/workflows/upstream-check.yml) runs daily and opens
 a PR that moves `JENA_VERSION` or `TEMURIN_VERSION` when Apache or Adoptium ships
-a newer one (Temurin: same feature release only). Dependabot covers the base
+a newer one (Temurin: same feature release only), and when Apache changes the
+Jena `KEYS` file vendored at `image/jena-KEYS`. Dependabot covers the base
 image and the actions.
 **Private first**;
 flip the package public when the are-we-happy gate is met — see the RFC's

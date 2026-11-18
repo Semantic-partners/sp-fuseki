@@ -79,6 +79,15 @@ RUN apt-get update \
 # check armed for a real secret instead of teaching everyone to skip its output.
 ARG JENA_SIGNING_FINGERPRINT=D99038A1731B8B31B71549EF04C95136D236A58F
 
+# Apache Jena KEYS, VENDORED at image/jena-KEYS and pinned by sha256. It was
+# fetched from downloads.apache.org at build time, with no fallback, and that
+# one host failing broke an arm64 build. A copy in the repo needs no network,
+# and the hash makes a changed file a visible diff here. upstream-check compares
+# it with Apache daily and opens a PR when Apache rotates keys, so a new signer
+# arrives as a reviewed change, never silently.
+ARG JENA_KEYS_SHA256=42e9e2ea58ec57a315cd54af725a0125626bf7ef5e920ef794d3727cb6988112
+COPY image/jena-KEYS /tmp/jena-KEYS
+
 # Adoptium's signing key, same reasoning. 3B04D753... is
 # "Adoptium GPG Key (DEB/RPM Signing Key) <temurin-dev@eclipse.org>", the issuer
 # of the .sig for the pinned JRE.
@@ -194,7 +203,7 @@ RUN set -eux; \
     [ -n "$FETCHED" ] || { echo "FATAL: no mirror served apache-jena-fuseki-${JENA_VERSION}" >&2; exit 1; }; \
     echo "fetched from $FETCHED"; \
     echo "$(cut -d' ' -f1 /tmp/fuseki.sha512)  /tmp/fuseki.tgz" | sha512sum -c -; \
-    $CURL "https://downloads.apache.org/jena/KEYS" -o /tmp/jena-KEYS; \
+    echo "${JENA_KEYS_SHA256}  /tmp/jena-KEYS" | sha256sum -c -; \
     export GNUPGHOME=/tmp/gnupg; mkdir -m 700 -p "$GNUPGHOME"; \
     gpg --batch --quiet --import /tmp/jena-KEYS; \
     gpg --batch --status-fd 1 --verify /tmp/fuseki.asc /tmp/fuseki.tgz \
