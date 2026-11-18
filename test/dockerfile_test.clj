@@ -154,3 +154,19 @@
     (is (str/includes? (second curl) "--retry-max-time"))
     (testing "and no fixed --retry-delay, which defeats exponential backoff"
       (is (not (str/includes? (second curl) "--retry-delay"))))))
+
+(deftest the-debian-upgrade-reruns-on-every-build-stamp
+  ;; The layer cache served a CACHED `apt-get upgrade` to the 2026-11-05 rebuild,
+  ;; which then shipped the same 16 fixable findings it was dispatched to clear.
+  ;; The ARG must be declared, and used, in the final stage ahead of the upgrade.
+  (let [final (last (str/split dockerfile #"(?m)^FROM "))
+        upgrade (first (filter #(str/includes? % "apt-get upgrade") (run-blocks final)))]
+    (is (re-find #"(?m)^ARG APT_REFRESH" final) "APT_REFRESH declared in the final stage")
+    (is (some? upgrade) "the final stage upgrades Debian packages")
+    (is (str/includes? upgrade "${APT_REFRESH}") "the upgrade RUN reads APT_REFRESH")
+    (is (< (str/index-of final "ARG APT_REFRESH") (str/index-of final "apt-get upgrade")))))
+
+(deftest base64-intrinsic-stays-off-until-the-jre-is-fixed
+  ;; CVE-2026-114938. Remove this test with the ENV once TEMURIN_VERSION and every
+  ;; EXTRA_JRE are builds that carry the fix (21.0.13.1+, 25.0.5.1+).
+  (is (re-find #"(?m)^ENV JDK_JAVA_OPTIONS=\"[^\"]*-XX:-UseBASE64Intrinsics" dockerfile)))

@@ -172,6 +172,13 @@
 
 (defn cache-scope [] "type=gha,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}")
 
+;; The layer cache above made rebuilds useless for security: the Dockerfile's
+;; `apt-get upgrade` RUN never changes text, so it came back CACHED and shipped
+;; the packages of whichever day first built it. The build stamp (date + sha)
+;; re-runs that layer once per date and commit; test and publish share the stamp,
+;; so publish still reuses the layer test just built.
+(def apt-refresh-arg "APT_REFRESH=${{ needs.plan.outputs.build }}\n")
+
 ;; ---------------------------------------------------------------------------
 ;; Jobs
 ;; ---------------------------------------------------------------------------
@@ -179,7 +186,7 @@
 (def plan-job
   (m :runs-on hosted
      ;; EXTRA_JENA lists older versions still published beside the Dockerfile's
-     ;; pin. The pin is Renovate-managed and is the leg that gets `latest`, so
+     ;; pin. upstream-check opens the PR that moves the pin; it is the leg that gets `latest`, so
      ;; there is one source of truth for "what is current".
      ;;
      ;; EXTRA_JENA is EMPTY on purpose. It held 6.1.0 until the CVE gate found two
@@ -210,7 +217,7 @@
              ;; updates. Publishing it would contradict the gate that made us drop
              ;; the 6.1.0 Jena leg. Only LTS versions belong in this list unless
              ;; someone needs a feature release for a specific reason.
-             :EXTRA_JRE "25.0.4.1+1")
+             :EXTRA_JRE "25.0.5+8")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
                  :jres "${{ steps.p.outputs.jres }}"
@@ -272,7 +279,8 @@
                          :tags "sp-fuseki:ci-${{ matrix.jena }}-jre${{ matrix.jre.major }}"
                          :platforms "linux/${{ matrix.arch }}"
                          :build-args (str "JENA_VERSION=${{ matrix.jena }}\n"
-                                          "TEMURIN_VERSION=${{ matrix.jre.version }}\n")
+                                          "TEMURIN_VERSION=${{ matrix.jre.version }}\n"
+                                          apt-refresh-arg)
                          ;; Shared with publish, so JRE/Fuseki/babashka download
                          ;; once per leg rather than once per job. Fewer requests
                          ;; is the real fix for the GitHub 503s; retries only
@@ -349,7 +357,8 @@
                          :file "image/Dockerfile"
                          :platforms "linux/${{ matrix.arch }}"
                          :build-args (str "JENA_VERSION=${{ matrix.jena }}\n"
-                                          "TEMURIN_VERSION=${{ matrix.jre.version }}\n")
+                                          "TEMURIN_VERSION=${{ matrix.jre.version }}\n"
+                                          apt-refresh-arg)
                          :outputs (str "type=image,name=" image
                                        ",push-by-digest=true,name-canonical=true,push=true")
                          :provenance true
@@ -391,6 +400,13 @@
   (str/join "\n"
             [(str "type=raw,value=${{ matrix.jena }}" jre-suffix "-${{ needs.plan.outputs.build }},enable=${{ " not-pr " }}")
              (str "type=raw,value=${{ matrix.jena }}" jre-suffix ",enable=${{ " not-pr " }}")
+             ;; The default leg ALSO answers to its explicit JRE name, so
+             ;; `6.2.0-jre21` means what `6.2.0-jre25` means: that Jena on that Java.
+             ;; It exists because the falsy-true-branch bug (workflows_test) once
+             ;; published it; people pulled it, and with nothing republishing it
+             ;; the tag sat from 2026-09-07 collecting the 16 fixable findings that
+             ;; upstream-check reported against it while `6.2.0` scanned clean.
+             (str "type=raw,value=${{ matrix.jena }}-jre${{ matrix.jre.major }},enable=${{ " not-pr " && matrix.jre.default }}")
              (str "type=raw,value=latest,enable=${{ " not-pr
                   " && matrix.jena == needs.plan.outputs.default"
                   " && matrix.jre.default"
@@ -574,8 +590,8 @@
      :on (m :push (m :branches ["main"] :tags ["v*"])
             :pull_request nil
             :workflow_dispatch nil)
-     ;; No cron: we build on version bumps, not on a clock. Renovate raises the
-     ;; PR and upstream-check catches what it misses.
+     ;; No cron: we build on version bumps, not on a clock. upstream-check opens
+     ;; the bump PRs.
      :env (m :REGISTRY "ghcr.io")
      ;; Two runs racing the same ref can land `latest` on the older commit's
      ;; default Jena. Newest push wins.

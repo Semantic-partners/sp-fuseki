@@ -86,7 +86,9 @@
     ;; If `6.2.0` gained a suffix, or a non-default leg could claim it, the meaning
     ;; of an existing tag would depend on which leg finished last.
     (doseq [l (str/split-lines (tags))
-            :when (and (not (str/blank? l)) (not (str/includes? l "value=latest")))]
+            :when (and (not (str/blank? l))
+                       (not (str/includes? l "value=latest"))
+                       (not (str/includes? l "-jre${{ matrix.jre.major }},")))]
       (is (str/includes? l "!matrix.jre.default && format('-jre{0}'")
           (str "tag must be suffixed on non-default JRE legs only: " l))
       ;; The trap this test previously walked into: it asserted the presence of
@@ -96,6 +98,12 @@
       ;; published that way once. The assertion above passed the whole time.
       (is (not (str/includes? l "matrix.jre.default && ''"))
           (str "the falsy-true-branch idiom publishes a suffix on the default leg: " l))))
+  (testing "the default leg also publishes its explicit -jre<major> name, and only it"
+    ;; Non-default legs already get that name from the suffix; this line is for the
+    ;; default leg, whose -jre21 tag otherwise goes stale (#36).
+    (let [l (tag-line "value=${{ matrix.jena }}-jre${{ matrix.jre.major }},")]
+      (is (some? l))
+      (is (str/includes? l "&& matrix.jre.default }}"))))
   (testing "latest requires the default JRE as well as the default Jena"
     (is (str/includes? (tag-line "value=latest") "matrix.jre.default")))
   (testing "caches and digest artifacts are per-JRE, or two legs would overwrite each other"
@@ -119,7 +127,7 @@
   (let [lines (->> (str/split-lines (tags))
                    (remove str/blank?)
                    (remove #(str/includes? % "value=pr-")))]
-    (is (= 3 (count lines)) "build-stamped, plain, and latest")
+    (is (= 4 (count lines)) "build-stamped, plain, explicit -jre on the default leg, and latest")
     (doseq [l lines]
       (is (str/includes? l "github.event_name != 'pull_request'")
           (str "release tag not gated to non-PR events: " l))))
@@ -422,3 +430,11 @@
            (set (map keyword (:needs ok)))))
     (testing "and it runs when a need failed, or a skip would read as a pass"
       (is (= "always()" (:if ok))))))
+
+(deftest every-image-build-refreshes-debian-packages
+  ;; Without a changing APT_REFRESH the `apt-get upgrade` layer is served from the
+  ;; gha cache, and a rebuild dispatched to clear fixable CVEs ships the same bytes.
+  (doseq [[id needle] [[:test "build-push-action"] [:publish "Build + push by digest"]]]
+    (let [args (get-in (step-named id needle) [:with :build-args])]
+      (is (str/includes? args "APT_REFRESH=${{ needs.plan.outputs.build }}")
+          (str id " must pass the build stamp as APT_REFRESH")))))
