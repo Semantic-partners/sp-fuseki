@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXTRA_JENA: ''
-      EXTRA_JRE: 25.0.4.1+1
+      EXTRA_JRE: 25.0.5+8
     outputs:
       default: ${{ steps.p.outputs.default }}
       matrix: ${{ steps.p.outputs.matrix }}
@@ -96,6 +96,7 @@ jobs:
         build-args: |
           JENA_VERSION=${{ matrix.jena }}
           TEMURIN_VERSION=${{ matrix.jre.version }}
+          APT_REFRESH=${{ needs.plan.outputs.build }}
         cache-from: type=gha,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
         cache-to: type=gha,mode=max,scope=jena-${{ matrix.jena }}-jre${{ matrix.jre.major }}-${{ matrix.arch }}
     - name: Unit tests (fuseki.edn renderer + this workflow)
@@ -155,6 +156,7 @@ jobs:
         build-args: |
           JENA_VERSION=${{ matrix.jena }}
           TEMURIN_VERSION=${{ matrix.jre.version }}
+          APT_REFRESH=${{ needs.plan.outputs.build }}
         outputs: type=image,name=${{ needs.plan.outputs.image }},push-by-digest=true,name-canonical=true,push=true
         provenance: true
         sbom: true
@@ -230,6 +232,7 @@ jobs:
         tags: |
           type=raw,value=${{ matrix.jena }}${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }}-${{ needs.plan.outputs.build }},enable=${{ github.event_name != 'pull_request' }}
           type=raw,value=${{ matrix.jena }}${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }},enable=${{ github.event_name != 'pull_request' }}
+          type=raw,value=${{ matrix.jena }}-jre${{ matrix.jre.major }},enable=${{ github.event_name != 'pull_request' && matrix.jre.default }}
           type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && matrix.jena == needs.plan.outputs.default && matrix.jre.default && github.ref == 'refs/heads/main' }}
           type=raw,value=pr-${{ github.event.number }}-${{ matrix.jena }}${{ !matrix.jre.default && format('-jre{0}', matrix.jre.major) || '' }},enable=${{ github.event_name == 'pull_request' }}
     - name: Create the manifest list

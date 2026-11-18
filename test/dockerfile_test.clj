@@ -165,3 +165,36 @@
         "before the first download")
     (testing "the accepted patterns let 6.x and later through, and nothing older"
       (is (str/includes? guard "[6-9].*|[1-9][0-9].*")))))
+(deftest the-debian-upgrade-reruns-on-every-build-stamp
+  ;; The layer cache served a CACHED `apt-get upgrade` to the 2026-11-05 rebuild,
+  ;; which then shipped the same 16 fixable findings it was dispatched to clear.
+  ;; The ARG must be declared, and used, in the final stage ahead of the upgrade.
+  (let [final (last (str/split dockerfile #"(?m)^FROM "))
+        upgrade (first (filter #(str/includes? % "apt-get upgrade") (run-blocks final)))]
+    (is (re-find #"(?m)^ARG APT_REFRESH" final) "APT_REFRESH declared in the final stage")
+    (is (some? upgrade) "the final stage upgrades Debian packages")
+    (is (str/includes? upgrade "${APT_REFRESH}") "the upgrade RUN reads APT_REFRESH")
+    (is (< (str/index-of final "ARG APT_REFRESH") (str/index-of final "apt-get upgrade")))))
+
+(deftest base64-intrinsic-stays-off-until-the-jre-is-fixed
+  ;; CVE-2026-114938. Remove this test with the ENV once TEMURIN_VERSION and every
+  ;; EXTRA_JRE are builds that carry the fix (21.0.13.1+, 25.0.5.1+).
+  (is (re-find #"(?m)^ENV JDK_JAVA_OPTIONS=\"[^\"]*-XX:-UseBASE64Intrinsics" dockerfile)))
+
+(deftest jena-keys-are-vendored-and-pinned
+  ;; KEYS came from downloads.apache.org at build time with no fallback, and that
+  ;; one host failing broke an arm64 build.
+  (testing "the build fetches no KEYS"
+    (is (not (re-find #"\$CURL[^;]*KEYS" dockerfile))))
+  (testing "it copies the vendored file and checks the pinned hash before import"
+    (is (str/includes? dockerfile "COPY image/jena-KEYS /tmp/jena-KEYS"))
+    (let [block (first (filter #(str/includes? % "gpg --batch --quiet --import /tmp/jena-KEYS") (run-blocks dockerfile)))]
+      (is (some? block))
+      (is (< (str/index-of block "sha256sum -c") (str/index-of block "--import /tmp/jena-KEYS")))))
+  (testing "the pin is the hash of the file in the repo"
+    (let [pin (second (re-find #"(?m)^ARG JENA_KEYS_SHA256=([0-9a-f]{64})$" dockerfile))
+          md (java.security.MessageDigest/getInstance "SHA-256")
+          bytes (java.nio.file.Files/readAllBytes (java.nio.file.Paths/get "image/jena-KEYS" (make-array String 0)))
+          hex (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md bytes)))]
+      (is (some? pin))
+      (is (= pin hex) "update ARG JENA_KEYS_SHA256 in the same commit as image/jena-KEYS"))))

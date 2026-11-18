@@ -5,7 +5,9 @@
 # archive), Temurin 21,
 # babashka entrypoint. Multi-arch (amd64 + arm64), non-root, healthchecked.
 
-# --- versions (Renovate-managed) ---
+# --- versions ---
+# .github/workflows/upstream-check.yml opens a PR when Jena or Temurin (same
+# feature release) moves past these pins.
 # This is the DEFAULT Jena — the leg CI tags `latest`. CI also builds the older
 # versions listed in EXTRA_JENA (.github/workflows/build.yml) via --build-arg.
 # renovate: datasource=maven depName=org.apache.jena:jena-fuseki-server
@@ -20,8 +22,7 @@ ARG JENA_VERSION=6.2.0
 # extension jars: `java.lang.foreign` (Panama) is a PREVIEW API in 21 and final in
 # 22, so a jar compiled for release 22 or later will not load on a 21 JVM at all —
 # it is refused on class file version before any API question arises.
-# (Renovate datasource TBD; bump with Jena.)
-ARG TEMURIN_VERSION=21.0.5+11
+ARG TEMURIN_VERSION=21.0.13+9
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
 ARG BB_VERSION=1.12.216
 
@@ -232,7 +233,15 @@ FROM debian:bookworm-slim
 # `upgrade` because the bookworm-slim tag lags Debian security by days. Trivy
 # failed a build on a libssl3 fix that was already in the archive but not yet in
 # the tag. Without it, a rebuild only takes fixes for packages we install here.
-RUN apt-get update \
+#
+# APT_REFRESH busts the layer cache. CI caches layers (type=gha), and this RUN's
+# text never changes, so a rebuild reused the cached layer and shipped the same
+# stale packages: the 2026-11-05 rebuild reported this step CACHED and left 16
+# fixable findings in place. CI passes the build stamp, so each build date
+# re-runs the upgrade while the fetch stage above stays cached.
+ARG APT_REFRESH=unset
+RUN echo "apt refresh: ${APT_REFRESH}" \
+ && apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
@@ -243,6 +252,16 @@ COPY --from=fetch /out/bin/bb /usr/local/bin/bb
 
 ENV JAVA_HOME=/opt/jre
 ENV PATH="/opt/jre/bin:${PATH}"
+
+# CVE-2026-114938 (Java4Shell): HotSpot's AVX-512 VBMI Base64 decode intrinsic
+# writes past its buffer on x86-64 CPUs with that extension. Fuseki reaches
+# java.util.Base64 without authentication: xsd:base64Binary literals in a query,
+# the Basic auth header, multipart uploads. The fix is OpenJDK 21.0.13.1 /
+# 25.0.5.1; until Temurin ships those, turn the intrinsic off. The flag exists on
+# every arch (it is a no-op on arm64) and costs only Base64 decode speed.
+# JDK_JAVA_OPTIONS is read by the `java` launcher whatever JVM_ARGS says, so a
+# user's heap settings do not drop it. Remove once the pin is a fixed build.
+ENV JDK_JAVA_OPTIONS="-XX:-UseBASE64Intrinsics"
 
 # The whole entrypoint tree: entrypoint.clj (orchestration) + sp_fuseki/render.clj
 # (pure rendering, unit-tested by test/render_test.clj).
