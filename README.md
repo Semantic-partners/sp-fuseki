@@ -780,9 +780,11 @@ babashka's gap is real and checked rather than assumed — `.sig` and `.asc` bot
 404 against its release assets, and `dockerfile_test.clj` asserts it stays
 checksum-only rather than quietly appearing verified.
 
-There is no cron — builds run on bumps. Renovate watches Jena via
-Maven Central, and [upstream-check.yml](.github/workflows/upstream-check.yml) runs
-weekly against `archive.apache.org` and opens an issue if a newer Fuseki exists.
+There is no cron — builds run on bumps.
+[upstream-check.yml](.github/workflows/upstream-check.yml) runs daily and opens
+a PR that moves `JENA_VERSION` or `TEMURIN_VERSION` when Apache or Adoptium ships
+a newer one (Temurin: same feature release only). Dependabot covers the base
+image and the actions.
 **Private first**;
 flip the package public when the are-we-happy gate is met — see the RFC's
 Distribution & CI section.

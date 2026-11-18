@@ -154,3 +154,14 @@
     (is (str/includes? (second curl) "--retry-max-time"))
     (testing "and no fixed --retry-delay, which defeats exponential backoff"
       (is (not (str/includes? (second curl) "--retry-delay"))))))
+
+(deftest jena-before-6-is-refused-at-build
+  ;; #33: a 5.x dist built green and could not start. The refusal must sit in the
+  ;; fetch stage, ahead of any download, so the mistake fails in seconds.
+  (let [fetch (second (str/split dockerfile #"(?m)^FROM "))
+        guard (first (filter #(str/includes? % "JENA_VERSION is not supported") (run-blocks fetch)))]
+    (is (some? guard) "the fetch stage refuses unsupported JENA_VERSION")
+    (is (< (str/index-of fetch "JENA_VERSION is not supported") (str/index-of fetch "$CURL"))
+        "before the first download")
+    (testing "the accepted patterns let 6.x and later through, and nothing older"
+      (is (str/includes? guard "[6-9].*|[1-9][0-9].*")))))

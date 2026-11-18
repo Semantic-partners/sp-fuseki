@@ -43,6 +43,17 @@ ARG TEMURIN_VERSION
 ARG BB_VERSION
 ARG TARGETARCH
 
+# Jena 6 or later only. The entrypoint launches the 6.x dist: the UI inside
+# fuseki-server.jar, and FusekiServerPlainCmd for the headless server. A 5.x dist
+# ships the UI as an unpacked webapp/ and not that class, so a 5.x image built
+# green and then could not start (#33). Refuse it here, where the cause is.
+RUN case "$JENA_VERSION" in \
+      [6-9].*|[1-9][0-9].*) ;; \
+      *) echo "FATAL: JENA_VERSION=$JENA_VERSION is not supported: this image launches the Jena 6+ dist layout." >&2; \
+         echo "A 5.x image builds but cannot start (UI webapp/ outside the jar, no FusekiServerPlainCmd). See #33." >&2; \
+         exit 1 ;; \
+    esac
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
  && rm -rf /var/lib/apt/lists/*
