@@ -5,9 +5,10 @@
 # because those are strings in a RUN and no ecosystem owns them. Those are
 # watched by .github/workflows/upstream-check.yml instead.
 #
-# Why this file exists at all: renovate.json has been in this repo for months
-# and the Renovate app was never installed, so nothing read it. Dependabot needs
-# no app and no token — checking this in turns it on.
+# Why this file exists at all: Dependabot needs no app and no token, so
+# checking this in turns it on. The Renovate app is installed on the org but has
+# opened nothing in any repo, and its config here was removed so two bots never
+# race over the same pins.
 
 version: 2
 updates:
