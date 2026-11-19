@@ -13,6 +13,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
             [cheshire.core :as json]
+            [babashka.process :as p]
             [sp-fuseki.workflows :as w]))
 
 (def wf w/build-workflow)
@@ -106,15 +107,44 @@
     (testing "and the workflow holds no Java version of its own"
       (is (nil? (get-in (job :plan) [:env :EXTRA_JRE])))
       (is (not (re-find version (w/->yaml wf))) "no Temurin version anywhere in build.yml"))
-    (testing "every leg in image/extra-jre is <version> or <version>/arm64=<version>, one major"
-      (doseq [leg (->> (str/split-lines (slurp "image/extra-jre"))
-                       (map #(str/trim (first (str/split % #"#" 2))))
-                       (remove str/blank?))]
-        (let [[_ v _ a] (re-matches #"(\d+[.\d]*\+\d+)(/arm64=(\d+[.\d]*\+\d+))?" leg)]
-          (is v (str "malformed leg: " leg))
-          (when a
-            (is (= (re-find #"^\d+" v) (re-find #"^\d+" a))
-                (str "arches disagree on major: " leg))))))))
+    (testing "through ci/jre-legs.sh, the parser upstream-check uses too"
+      (is (str/includes? script "ci/jre-legs.sh image/extra-jre")))))
+
+(defn- jre-legs
+  "Run ci/jre-legs.sh over `text`, written byte for byte, and return its exit
+  code and output."
+  [text]
+  (let [f (java.io.File/createTempFile "extra-jre" "")]
+    (try
+      (spit f text)
+      (let [{:keys [exit out err]} (p/shell {:out :string :err :string :continue true}
+                                            "bash" "ci/jre-legs.sh" (str f))]
+        {:exit exit :out out :err err})
+      (finally (.delete f)))))
+
+(deftest jre-legs-is-the-one-parser-and-it-is-strict
+  ;; The plan step and upstream-check once parsed image/extra-jre separately and
+  ;; disagreed: a CRLF file gave plan an arm64 pin of `25.0.5+8\r` and a leg of
+  ;; "\r", and `25.0.5+8 junk` was two legs to one and an error to the other.
+  (testing "the committed file has no carriage return (read raw: split-lines hides \\r)"
+    (is (not (str/includes? (slurp "image/extra-jre") "\r"))))
+  (testing "the committed file parses"
+    (is (zero? (:exit (jre-legs (slurp "image/extra-jre"))))))
+  (testing "a good file gives line, leg, x64 and arm64 per leg, comments skipped"
+    (is (= (str "2\t25.0.5.1+2/arm64=25.0.5+8\t25.0.5.1+2\t25.0.5+8\n"
+                "3\t21.0.13.1+2\t21.0.13.1+2\t\n")
+           (:out (jre-legs "# c\n25.0.5.1+2/arm64=25.0.5+8  # x\n21.0.13.1+2\n\n")))))
+  (testing "and refuses, loudly, anything that is not a leg"
+    (doseq [[why text] {"CRLF"              "# c\r\n25.0.5.1+2/arm64=25.0.5+8\r\n\r\n"
+                        "two words"         "25.0.5+8 junk\n"
+                        "empty override"    "25.0.5+8/arm64=\n"
+                        "majors disagree"   "25.0.5.1+2/arm64=21.0.13+9\n"
+                        "not a version"     "25.0.5\n"
+                        "junk after arm64"  "25.0.5.1+2/arm64=25.0.5+8/x\n"}]
+      (let [{:keys [exit out err]} (jre-legs text)]
+        (is (not (zero? exit)) (str why " must fail"))
+        (is (str/blank? out) (str why " must print no legs"))
+        (is (not (str/blank? err)) (str why " must say why"))))))
   (testing "the default leg keeps the tags it already publishes"
     ;; If `6.2.0` gained a suffix, or a non-default leg could claim it, the meaning
     ;; of an existing tag would depend on which leg finished last.

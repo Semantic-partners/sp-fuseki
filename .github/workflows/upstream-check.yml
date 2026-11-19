@@ -169,7 +169,6 @@ jobs:
           [[ $X64 =~ $VERSION_RE ]] || { echo "ARG TEMURIN_VERSION in image/Dockerfile is not a version: '$X64'" >&2; exit 1; }
           [ -z "$ARM" ] || [[ $ARM =~ $VERSION_RE ]] \
             || { echo "ARG TEMURIN_VERSION_ARM64 in image/Dockerfile is not a version: '$ARM'" >&2; exit 1; }
-          [ -f image/extra-jre ] || { echo "image/extra-jre is missing" >&2; exit 1; }
 
           # True when $2 sorts strictly after $1.
           newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ]; }
@@ -233,31 +232,31 @@ jobs:
           KEY="${NEW_X64}-arm64-${NEW_ARM:-same}"
           SUMMARY="$NEW_X64${NEW_ARM:+ (arm64 $NEW_ARM)}"
 
-          # image/extra-jre, rewritten line by line so its comments survive.
-          : > "$RUNNER_TEMP/extra-jre"
-          while IFS= read -r -u 3 line || [ -n "$line" ]; do
-            entry="${line%%#*}"
-            read -r -a words <<< "$entry"
-            if [ "${#words[@]}" -eq 0 ]; then printf '%s\n' "$line" >> "$RUNNER_TEMP/extra-jre"; continue; fi
-            [ "${#words[@]}" -eq 1 ] || { echo "image/extra-jre: one leg per line, got '$line'" >&2; exit 1; }
-            leg="${words[0]}"
-            v="${leg%%/arm64=*}"
-            a="${leg#*/arm64=}"; [ "$a" = "$leg" ] && a=""
-            if ! [[ $v =~ $VERSION_RE ]] || { [ -n "$a" ] && ! [[ $a =~ $VERSION_RE ]]; }; then
-              echo "image/extra-jre: not <version> or <version>/arm64=<version>: '$leg'" >&2; exit 1
-            fi
-            [ "${a%%[.+]*}" = "${v%%[.+]*}" ] || [ -z "$a" ] \
-              || { echo "image/extra-jre: arches disagree on major in '$leg'" >&2; exit 1; }
+          # The extra legs, through ci/jre-legs.sh: the one parser, shared with
+          # build.yml's plan step. It fails on anything that is not a leg.
+          LEGS="$(ci/jre-legs.sh image/extra-jre)"
+          declare -A OLD NEW
+          while IFS=$'\t' read -r -u 3 n leg v a; do
             T="$(target "$v" "$a")"
             nv="${T% *}"; na="${T#* }"; [ "$na" = "-" ] && na=""
-            want="${nv}${na:+/arm64=$na}"
-            printf '%s\n' "${line/"$leg"/"$want"}" >> "$RUNNER_TEMP/extra-jre"
+            OLD[$n]="$leg"
+            NEW[$n]="${nv}${na:+/arm64=$na}"
             m="${v%%[.+]*}"
             [ "$nv" = "$v" ] || note "\`image/extra-jre\` jre$m (x64)" "$v" "$nv" >> "$RUNNER_TEMP/changes.md"
             [ "$na" = "$a" ] || note "\`image/extra-jre\` jre$m arm64" "$a" "$na" >> "$RUNNER_TEMP/changes.md"
             if ! fixed "$nv" || ! fixed "${na:-$nv}"; then ALL_FIXED=no; fi
             KEY="${KEY}-jre${m}-${nv}-arm64-${na:-same}"
             SUMMARY="${SUMMARY}, jre$m $nv${na:+ (arm64 $na)}"
+          done 3< <(printf '%s\n' "$LEGS" | sed '/^$/d')
+
+          # image/extra-jre rewritten line by line, by the line numbers jre-legs.sh
+          # gave, so its comments survive.
+          : > "$RUNNER_TEMP/extra-jre"
+          n=0
+          while IFS= read -r -u 3 line || [ -n "$line" ]; do
+            n=$((n + 1))
+            if [ -n "${NEW[$n]+x}" ]; then line="${line/"${OLD[$n]}"/"${NEW[$n]}"}"; fi
+            printf '%s\n' "$line" >> "$RUNNER_TEMP/extra-jre"
           done 3< image/extra-jre
 
           # Only worth saying while the mitigation is still there.
