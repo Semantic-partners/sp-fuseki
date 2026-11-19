@@ -68,7 +68,7 @@
   (testing "plan reads the default from the Dockerfile and emits one object per leg"
     (let [script (:run (second (:steps (job :plan))))]
       (is (str/includes? script "ARG TEMURIN_VERSION=") "read from the Dockerfile, not duplicated in CI")
-      (is (str/includes? script "EXTRA_JRE") "extra legs come from a variable, like EXTRA_JENA")
+      (is (str/includes? script "image/extra-jre") "extra legs come from image/extra-jre, beside the Dockerfile")
       (testing "as objects, because the tag needs the major and the build-arg the whole version"
         (is (str/includes? script "version:"))
         (is (str/includes? script "major:"))
@@ -94,6 +94,27 @@
       (is (str/includes? script "ARG TEMURIN_VERSION_ARM64=") "read from the Dockerfile")
       (is (str/includes? script "arm64:") "each leg object carries its override")
       (is (str/includes? script "disagree on major") "a leg whose arches disagree on major is refused")))
+
+(deftest extra-jre-legs-live-beside-the-dockerfile
+  ;; upstream-check's bump PR moves every Java pin. It cannot push build.yml (the
+  ;; workflow token may not write workflow files), so a version held in the
+  ;; workflow is one no bot can update — it got a warning nobody read.
+  (let [script (:run (second (:steps (job :plan))))
+        version #"\d+\.\d+\.\d+(\.\d+)?\+\d+"]
+    (testing "plan reads the extra legs from image/extra-jre"
+      (is (str/includes? script "image/extra-jre")))
+    (testing "and the workflow holds no Java version of its own"
+      (is (nil? (get-in (job :plan) [:env :EXTRA_JRE])))
+      (is (not (re-find version (w/->yaml wf))) "no Temurin version anywhere in build.yml"))
+    (testing "every leg in image/extra-jre is <version> or <version>/arm64=<version>, one major"
+      (doseq [leg (->> (str/split-lines (slurp "image/extra-jre"))
+                       (map #(str/trim (first (str/split % #"#" 2))))
+                       (remove str/blank?))]
+        (let [[_ v _ a] (re-matches #"(\d+[.\d]*\+\d+)(/arm64=(\d+[.\d]*\+\d+))?" leg)]
+          (is v (str "malformed leg: " leg))
+          (when a
+            (is (= (re-find #"^\d+" v) (re-find #"^\d+" a))
+                (str "arches disagree on major: " leg))))))))
   (testing "the default leg keeps the tags it already publishes"
     ;; If `6.2.0` gained a suffix, or a non-default leg could claim it, the meaning
     ;; of an existing tag would depend on which leg finished last.

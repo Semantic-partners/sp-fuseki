@@ -18,7 +18,7 @@ ARG JENA_VERSION=6.2.0
 # a 21 JRE while claiming to be something else.
 #
 # Jena 6.x targets Java 21, so 21 stays the default and the leg that gets `latest`.
-# CI builds the versions in EXTRA_JRE alongside it. The reason those legs exist is
+# CI builds the versions in image/extra-jre alongside it. The reason those legs exist is
 # extension jars: `java.lang.foreign` (Panama) is a PREVIEW API in 21 and final in
 # 22, so a jar compiled for release 22 or later will not load on a 21 JVM at all —
 # it is refused on class file version before any API question arises.
@@ -29,7 +29,7 @@ ARG JENA_VERSION=6.2.0
 # fix, an x86-64-only bug) is out for x64 only, so arm64 stays on 21.0.13+9 until
 # aarch64 builds exist. upstream-check opens the PR that empties the override
 # when they do. Both must name the same major, or the build refuses.
-# CI passes both for every leg (EXTRA_JRE takes `<x64>/arm64=<arm64>`), so the
+# CI passes both for every leg (image/extra-jre takes `<x64>/arm64=<arm64>`), so the
 # default here applies to the default leg and to local builds.
 ARG TEMURIN_VERSION=21.0.13.1+2
 ARG TEMURIN_VERSION_ARM64=21.0.13+9

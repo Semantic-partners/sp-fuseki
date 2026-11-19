@@ -710,8 +710,8 @@ listing them in `EXTRA_JENA`, which is currently **empty**.
 
 The JRE is a second axis. `image/Dockerfile` pins the default — Temurin 21, which
 is what Jena 6.x targets (`Java-Version: 21` in the jar's own manifest) — and
-`EXTRA_JRE` adds legs beside it, tagged `<jena>-jre<major>`. Currently **25**, the
-LTS after 21:
+`image/extra-jre` adds legs beside it, one per line, tagged `<jena>-jre<major>`.
+Currently **25**, the LTS after 21:
 
 ```
 ghcr.io/semantic-partners/sp-fuseki:6.2.0            # Temurin 21, the default
@@ -723,14 +723,16 @@ The pin is per arch. Adoptium can ship an arch late: the
 (21.0.13.1+2, 25.0.5.1+2) is out for x64 only, so amd64 images carry it and arm64
 images stay on 21.0.13+9 / 25.0.5+8 until aarch64 builds exist. The bug is
 x86-64-only, so arm64 is not exposed. `TEMURIN_VERSION_ARM64` in the Dockerfile,
-and `<version>/arm64=<version>` in `EXTRA_JRE`, hold the arm64 pin; empty means
-arm64 takes the x64 version. Both arches of a leg must name the same major or the
-build fails. upstream-check compares each arch's pin with Adoptium's latest for
-that arch and opens a bump PR: x64 moves without waiting for aarch64, and the
-override is deleted once aarch64 has the x64 build. A stale `EXTRA_JRE` leg is a
-warning, and a line in that PR, because the workflow token cannot push
-`build.yml`. Until every pin is
-fixed, the image also sets `JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics`.
+and `<version>/arm64=<version>` in `image/extra-jre`, hold the arm64 pin; empty
+means arm64 takes the x64 version. Both arches of a leg must name the same major
+or the build fails.
+
+upstream-check compares every pin, each arch against Adoptium's latest for that
+arch, and opens one bump PR for all of them: x64 moves without waiting for
+aarch64, and an override goes once aarch64 has the x64 build. The pins live in
+`image/`, not in the workflow, so that PR can move them. Anything it cannot read
+or compare fails the job. Until every pin is fixed, the image also sets
+`JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics`.
 
 Only LTS versions go in that list without a specific reason. A feature release
 stops receiving Temurin builds about six months after it ships — Java 24's last

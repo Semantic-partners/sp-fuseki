@@ -203,29 +203,13 @@
      ;;
      ;; The mechanism stays: add a version here to publish it alongside the
      ;; Dockerfile's pin, and the gate will tell you if it's patchable.
-     ;; EXTRA_JRE is EMPTY by default, so the axis adds nothing until someone
-     ;; needs it. Why it exists: `java.lang.foreign` (Panama) is preview in 21 and
-     ;; final in 22, so an extension jar compiled for release 22+ will not load on
-     ;; the default 21 JVM at all — refused on class file version, before any API
-     ;; question. A leg per JRE is cheaper than telling that user to build their
-     ;; own image, which is the argument this repository exists to make.
-     :env (m :EXTRA_JENA ""
-             ;; 25 is the current LTS and where anyone doing this seriously should
-             ;; land. It is here rather than as the default because Jena 6.x
-             ;; targets 21 — the jar's own manifest says Java-Version: 21 — and a
-             ;; default that moves ahead of upstream's target changes what `6.2.0`
-             ;; and `latest` mean for people already pulling them.
-             ;;
-             ;; NOT 24, and the reason generalises: it is a feature release whose
-             ;; last Temurin build was over a year ago, so it takes no security
-             ;; updates. Publishing it would contradict the gate that made us drop
-             ;; the 6.1.0 Jena leg. Only LTS versions belong in this list unless
-             ;; someone needs a feature release for a specific reason.
-             ;;
-             ;; An entry is `<version>` or `<version>/arm64=<arm64 version>`, the
-             ;; same per-arch pin as the Dockerfile's TEMURIN_VERSION_ARM64. Drop
-             ;; the /arm64= part once upstream-check reports aarch64 has caught up.
-             :EXTRA_JRE "25.0.5.1+2/arm64=25.0.5+8")
+     ;;
+     ;; The extra JRE legs are NOT here. They live in image/extra-jre, beside the
+     ;; Dockerfile's TEMURIN_VERSION, because upstream-check's bump PR moves them
+     ;; and the workflow token may not push this file's output. A Java version in
+     ;; this file is one no bot can update. Why the axis exists, and why 25 and not
+     ;; 24: see that file.
+     :env (m :EXTRA_JENA "")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
                  :jres "${{ steps.p.outputs.jres }}"
@@ -243,6 +227,9 @@
                           "[ -n \"$JRE_DEF\" ] || { echo \"could not read ARG TEMURIN_VERSION from image/Dockerfile\" >&2; exit 1; }\n"
                           "# Empty when arm64 takes the same build as x64.\n"
                           "JRE_ARM64_DEF=\"$(sed -n 's/^ARG TEMURIN_VERSION_ARM64=//p' image/Dockerfile | head -1)\"\n"
+                          "# The extra legs: one per line in image/extra-jre, # comments allowed.\n"
+                          "[ -f image/extra-jre ] || { echo \"image/extra-jre is missing\" >&2; exit 1; }\n"
+                          "EXTRA_JRE=\"$(sed 's/#.*//' image/extra-jre | tr -s ' \\t' '\\n' | sed '/^$/d')\"\n"
                           "# One object per JRE leg: the whole version for the build-arg, the arm64\n"
                           "# override (empty = same), the major for the tag, and whether it is the\n"
                           "# default — which decides whether that tag carries a -jre suffix at all.\n"

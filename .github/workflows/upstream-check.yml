@@ -136,18 +136,22 @@ jobs:
         with:
           token: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      # PER ARCH. Adoptium can publish one arch ahead of another: the
+      # PER ARCH, EVERY LEG. Adoptium can publish one arch ahead of another: the
       # CVE-2026-114938 point releases shipped for x64 days before aarch64. So the
-      # pin is per arch (TEMURIN_VERSION_ARM64, and `/arm64=` in EXTRA_JRE), and
-      # each arch's pin is checked against Adoptium's latest FOR THAT ARCH:
+      # pin is per arch (TEMURIN_VERSION_ARM64, and `/arm64=` in image/extra-jre),
+      # and each arch's pin is checked against Adoptium's latest FOR THAT ARCH:
       #
       #   x64 moves to x64's latest when that sorts after the pin;
       #   arm64 moves to aarch64's latest when that sorts after ITS pin, and the
-      #   override goes (empty) once arm64 would land on the x64 build.
+      #   override goes once arm64 would land on the x64 build.
       #
-      # So x64 never waits on aarch64, and the override deletes itself when
-      # aarch64 catches up. Versions compare by ORDER (sort -V): a pin ahead of
-      # Adoptium's latest for an arch is left alone, never moved back.
+      # So x64 never waits on aarch64, and an override deletes itself when aarch64
+      # catches up. Versions compare by ORDER (sort -V): a pin ahead of Adoptium's
+      # latest for an arch is left alone, never moved back.
+      #
+      # The default leg and every image/extra-jre leg go into ONE PR. There is no
+      # warn-only path: anything this cannot read or compare fails the job, and a
+      # failed scheduled run is what reaches a person.
       - name: Compare each arch's Temurin pins against Adoptium
         id: check
         env:
@@ -158,13 +162,14 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s inherit_errexit
+          VERSION_RE='^[0-9]+(\.[0-9]+)*\+[0-9]+$'
           X64="$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)"
-          [ -n "$X64" ] || { echo "could not read ARG TEMURIN_VERSION from image/Dockerfile" >&2; exit 1; }
           # Empty means arm64 takes TEMURIN_VERSION.
           ARM="$(sed -n 's/^ARG TEMURIN_VERSION_ARM64=//p' image/Dockerfile | head -1)"
-          # build.yml is generated from ci/sp_fuseki/workflows.clj; it holds the
-          # same value and is plain to read from here.
-          EXTRA="$(sed -n 's/^ *EXTRA_JRE: *//p' .github/workflows/build.yml | head -1 | tr -d "\"'")"
+          [[ $X64 =~ $VERSION_RE ]] || { echo "ARG TEMURIN_VERSION in image/Dockerfile is not a version: '$X64'" >&2; exit 1; }
+          [ -z "$ARM" ] || [[ $ARM =~ $VERSION_RE ]] \
+            || { echo "ARG TEMURIN_VERSION_ARM64 in image/Dockerfile is not a version: '$ARM'" >&2; exit 1; }
+          [ -f image/extra-jre ] || { echo "image/extra-jre is missing" >&2; exit 1; }
 
           # True when $2 sorts strictly after $1.
           newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ]; }
@@ -176,7 +181,7 @@ jobs:
               | jq -r '.[0].release_name // empty' | sed 's/^jdk-//')"
             [ -n "$v" ] || { echo "Adoptium returned no $2 release for $1 — API shape changed" >&2; exit 1; }
             # It flows into sed, a branch name and jq strings: a version, or nothing.
-            [[ $v =~ ^[0-9]+(\.[0-9]+)*\+[0-9]+$ ]] \
+            [[ $v =~ $VERSION_RE ]] \
               || { echo "Adoptium's $2 release for $1 is not a version: '$v'" >&2; exit 1; }
             echo "$v"
           }
@@ -205,105 +210,111 @@ jobs:
             return 1
           }
 
+          # One markdown line per pin that moves, for the PR body.
+          note() {  # what from to
+            # shellcheck disable=SC2016  # backticks are markdown
+            if [ -z "$3" ]; then printf -- '- %s: `%s` → empty; aarch64 has the x64 build, so the override goes.\n' "$1" "$2"
+            elif [ -z "$2" ]; then printf -- '- %s: unset → `%s`; aarch64 has no build of the new x64 version yet.\n' "$1" "$3"
+            else printf -- '- %s: `%s` → `%s`\n' "$1" "$2" "$3"; fi
+          }
+
           ALL_FIXED=yes
+          : > "$RUNNER_TEMP/changes.md"
+
           T="$(target "$X64" "$ARM")"
           NEW_X64="${T% *}"; NEW_ARM="${T#* }"; [ "$NEW_ARM" = "-" ] && NEW_ARM=""
           if ! fixed "$NEW_X64" || ! fixed "${NEW_ARM:-$NEW_X64}"; then ALL_FIXED=no; fi
+          # shellcheck disable=SC2016  # backticks are markdown
+          [ "$NEW_X64" = "$X64" ] || note '`TEMURIN_VERSION` (x64)' "$X64" "$NEW_X64" >> "$RUNNER_TEMP/changes.md"
+          # shellcheck disable=SC2016  # backticks are markdown
+          [ "$NEW_ARM" = "$ARM" ] || note '`TEMURIN_VERSION_ARM64`' "$ARM" "$NEW_ARM" >> "$RUNNER_TEMP/changes.md"
+          # The branch names the whole target state, every leg and both arches, so a
+          # rerun finds its own PR and any different target is a different PR.
+          KEY="${NEW_X64}-arm64-${NEW_ARM:-same}"
+          SUMMARY="$NEW_X64${NEW_ARM:+ (arm64 $NEW_ARM)}"
 
-          # EXTRA_JRE lives in workflows.clj and regenerates build.yml, which the
-          # workflow token may not push. So a stale leg is a warning here, and a
-          # line in the bump PR's body when there is one.
-          : > "$RUNNER_TEMP/extra.md"
-          # Entries are <version> or <version>/arm64=<version>; the split is the point.
-          for leg in $EXTRA; do
+          # image/extra-jre, rewritten line by line so its comments survive.
+          : > "$RUNNER_TEMP/extra-jre"
+          while IFS= read -r -u 3 line || [ -n "$line" ]; do
+            entry="${line%%#*}"
+            read -r -a words <<< "$entry"
+            if [ "${#words[@]}" -eq 0 ]; then printf '%s\n' "$line" >> "$RUNNER_TEMP/extra-jre"; continue; fi
+            [ "${#words[@]}" -eq 1 ] || { echo "image/extra-jre: one leg per line, got '$line'" >&2; exit 1; }
+            leg="${words[0]}"
             v="${leg%%/arm64=*}"
             a="${leg#*/arm64=}"; [ "$a" = "$leg" ] && a=""
+            if ! [[ $v =~ $VERSION_RE ]] || { [ -n "$a" ] && ! [[ $a =~ $VERSION_RE ]]; }; then
+              echo "image/extra-jre: not <version> or <version>/arm64=<version>: '$leg'" >&2; exit 1
+            fi
+            [ "${a%%[.+]*}" = "${v%%[.+]*}" ] || [ -z "$a" ] \
+              || { echo "image/extra-jre: arches disagree on major in '$leg'" >&2; exit 1; }
             T="$(target "$v" "$a")"
             nv="${T% *}"; na="${T#* }"; [ "$na" = "-" ] && na=""
             want="${nv}${na:+/arm64=$na}"
-            if [ "$want" != "$leg" ]; then
-              echo "::warning::EXTRA_JRE leg $leg is behind: set it to $want in ci/sp_fuseki/workflows.clj and run bb ci/generate.clj"
-              # shellcheck disable=SC2016  # backticks are markdown
-              printf -- '- `EXTRA_JRE` in `ci/sp_fuseki/workflows.clj`: `%s` → `%s`, then `bb ci/generate.clj`.\n' "$leg" "$want" >> "$RUNNER_TEMP/extra.md"
-            fi
+            printf '%s\n' "${line/"$leg"/"$want"}" >> "$RUNNER_TEMP/extra-jre"
+            m="${v%%[.+]*}"
+            [ "$nv" = "$v" ] || note "\`image/extra-jre\` jre$m (x64)" "$v" "$nv" >> "$RUNNER_TEMP/changes.md"
+            [ "$na" = "$a" ] || note "\`image/extra-jre\` jre$m arm64" "$a" "$na" >> "$RUNNER_TEMP/changes.md"
             if ! fixed "$nv" || ! fixed "${na:-$nv}"; then ALL_FIXED=no; fi
-          done
+            KEY="${KEY}-jre${m}-${nv}-arm64-${na:-same}"
+            SUMMARY="${SUMMARY}, jre$m $nv${na:+ (arm64 $na)}"
+          done 3< image/extra-jre
 
           # Only worth saying while the mitigation is still there.
           grep -q '^ENV JDK_JAVA_OPTIONS=.*UseBASE64Intrinsics' image/Dockerfile || ALL_FIXED=no
 
-          if [ "$NEW_X64" != "$X64" ] || [ "$NEW_ARM" != "$ARM" ]; then CHANGED=yes; else CHANGED=no; fi
+          if [ -s "$RUNNER_TEMP/changes.md" ]; then CHANGED=yes; else CHANGED=no; fi
           {
             echo "changed=$CHANGED"
             echo "x64=$X64"
-            echo "arm=$ARM"
             echo "new_x64=$NEW_X64"
             echo "new_arm=$NEW_ARM"
-            echo "major=${X64%%[.+]*}"
+            echo "key=$KEY"
+            echo "summary=$SUMMARY"
             echo "all_fixed=$ALL_FIXED"
           } >> "$GITHUB_OUTPUT"
-          echo "default leg: changed=$CHANGED x64 $X64 -> $NEW_X64, arm64 override '${ARM}' -> '${NEW_ARM}'; every pin fixed after bump: $ALL_FIXED"
+          echo "changed=$CHANGED; target: $SUMMARY; every pin fixed after bump: $ALL_FIXED"
+          cat "$RUNNER_TEMP/changes.md"
 
       - name: Open (or keep) the bump PR
         if: steps.check.outputs.changed == 'yes'
         env:
           X64: ${{ steps.check.outputs.x64 }}
-          ARM: ${{ steps.check.outputs.arm }}
           NEW_X64: ${{ steps.check.outputs.new_x64 }}
           NEW_ARM: ${{ steps.check.outputs.new_arm }}
-          MAJOR: ${{ steps.check.outputs.major }}
+          KEY: ${{ steps.check.outputs.key }}
+          SUMMARY: ${{ steps.check.outputs.summary }}
           ALL_FIXED: ${{ steps.check.outputs.all_fixed }}
           OWN_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN != '' }}
         run: |
           set -euo pipefail
-          # The arm64 override first; bump-pr.sh moves TEMURIN_VERSION and commits
-          # everything changed under image/.
+          # The arm64 override and the extra legs first; bump-pr.sh moves
+          # TEMURIN_VERSION and commits everything changed under image/.
           sed -i "s/^ARG TEMURIN_VERSION_ARM64=.*/ARG TEMURIN_VERSION_ARM64=${NEW_ARM}/" image/Dockerfile
           grep -qx "ARG TEMURIN_VERSION_ARM64=${NEW_ARM}" image/Dockerfile \
             || { echo "could not set ARG TEMURIN_VERSION_ARM64=${NEW_ARM} in image/Dockerfile" >&2; exit 1; }
-          TITLE="Temurin ${NEW_X64}${NEW_ARM:+, arm64 $NEW_ARM} (from ${X64}${ARM:+, arm64 $ARM})"
+          cp "$RUNNER_TEMP/extra-jre" image/extra-jre
+          TITLE="Temurin ${SUMMARY}"
           # Backticks throughout are markdown, not command substitution.
           # shellcheck disable=SC2016
           {
-            printf 'Moves the Temurin %s pins in `image/Dockerfile`:\n\n' "$MAJOR"
-            if [ "$NEW_X64" = "$X64" ]; then
-              printf -- '- `TEMURIN_VERSION` (x64): stays `%s`\n' "$X64"
-            else
-              printf -- '- `TEMURIN_VERSION` (x64): `%s` → `%s`\n' "$X64" "$NEW_X64"
-            fi
-            if [ -z "$ARM" ] && [ -z "$NEW_ARM" ]; then
-              printf -- '- `TEMURIN_VERSION_ARM64`: unset; arm64 takes the x64 build.\n\n'
-            elif [ "$NEW_ARM" = "$ARM" ]; then
-              printf -- '- `TEMURIN_VERSION_ARM64`: stays `%s`. aarch64 has no `%s` yet.\n\n' "$ARM" "$NEW_X64"
-            elif [ -n "$NEW_ARM" ]; then
-              printf -- '- `TEMURIN_VERSION_ARM64`: `%s` → `%s`. aarch64 has no `%s` yet.\n\n' "${ARM:-(empty)}" "$NEW_ARM" "$NEW_X64"
-            else
-              printf -- '- `TEMURIN_VERSION_ARM64`: `%s` → empty. aarch64 has the x64 build, so the override goes.\n\n' "${ARM:-(empty)}"
-            fi
+            printf 'Moves the Temurin pins to the latest Adoptium build for each arch:\n\n'
+            cat "$RUNNER_TEMP/changes.md"
+            printf '\nx64 does not wait for aarch64; an arm64 override stays until aarch64 has the x64 build.\n\n'
             printf 'Temurin point releases carry the OpenJDK security fixes, so a stale pin is a JVM with known fixes missing. Trivy cannot see this: it reads jars, and a JRE lib/modules is not one.\n\n'
-            if [ -s "$RUNNER_TEMP/extra.md" ]; then
-              printf 'Also behind, and not in this PR (the workflow token may not push `build.yml`); make these on this branch:\n\n'
-              cat "$RUNNER_TEMP/extra.md"
-              printf '\n'
-            fi
             if [ "$ALL_FIXED" = "yes" ]; then
-              printf 'With this PR%s, every pin on every arch carries the CVE-2026-114938 fix. The `JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics` mitigation in `image/Dockerfile`, its test in `test/dockerfile_test.clj` and `CVE_FIXED_IN` in this workflow can go.\n\n' \
-                "$([ -s "$RUNNER_TEMP/extra.md" ] && echo ' and the EXTRA_JRE changes above')"
+              printf 'With this PR, every pin on every arch carries the CVE-2026-114938 fix. The `JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics` mitigation in `image/Dockerfile`, its test in `test/dockerfile_test.clj` and `CVE_FIXED_IN` in this workflow can go.\n\n'
             fi
             if [ "$OWN_TOKEN" != "true" ]; then
               printf '**CI has not run.** This PR was opened with the workflow token, which starts no other workflow. Close and reopen it to run `build`.\n\n'
             fi
             printf '_Opened by the `upstream-check` workflow._\n'
           } > "${RUNNER_TEMP}/pr-body.md"
-          # The branch names the whole target, both arches, so dropping the arm64
-          # override is a different PR from an x64 bump to the same version, and a
-          # closed x64 bump cannot block it.
-          if [ -n "$NEW_ARM" ]; then KEY="${NEW_X64}-arm64-${NEW_ARM}"
-          elif [ -n "$ARM" ]; then KEY="${NEW_X64}-arm64-dropped"
-          else KEY="$NEW_X64"; fi
+          # One prefix for every Temurin bump: this PR supersedes any older one,
+          # whichever leg it moved.
           BUMP_KEY="$KEY" \
-            ci/bump-pr.sh TEMURIN_VERSION "$X64" "$NEW_X64" "upstream/temurin-${MAJOR}-" "$TITLE" \
-            "${RUNNER_TEMP}/pr-body.md" "^Temurin ${MAJOR}: pin is "
+            ci/bump-pr.sh TEMURIN_VERSION "$X64" "$NEW_X64" "upstream/temurin-" "$TITLE" \
+            "${RUNNER_TEMP}/pr-body.md" "^Temurin [0-9]+: pin is "
 
   jena-keys:
     # image/jena-KEYS is a vendored copy, pinned by ARG JENA_KEYS_SHA256, so the

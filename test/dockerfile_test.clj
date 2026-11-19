@@ -178,7 +178,7 @@
 
 (deftest base64-intrinsic-stays-off-until-the-jre-is-fixed
   ;; CVE-2026-114938. Remove this test with the ENV once every pin, on every arch
-  ;; (TEMURIN_VERSION, TEMURIN_VERSION_ARM64, each EXTRA_JRE leg), is a build that
+  ;; (TEMURIN_VERSION, TEMURIN_VERSION_ARM64, each image/extra-jre leg), is a build that
   ;; carries the fix (21.0.13.1+, 25.0.5.1+). The x64 pins are; arm64 is not yet.
   (is (re-find #"(?m)^ENV JDK_JAVA_OPTIONS=\"[^\"]*-XX:-UseBASE64Intrinsics" dockerfile)))
 
