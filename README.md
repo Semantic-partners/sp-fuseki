@@ -634,9 +634,9 @@ signature at all. Full detail under [Publishing](#publishing).
 
 One asymmetry worth stating here rather than leaving in the Dockerfile: the JRE's
 public key comes from a keyserver, so key and artifact travel different channels.
-Apache serves `KEYS` from the same host as the tarball, so anyone who owns that
-host owns both — and **the pinned fingerprint is the only thing standing there**.
-It is doing more work in the Fuseki case than in the JRE one.
+Apache serves `KEYS` from the same host as the tarball, so the build does not
+fetch it: `image/jena-KEYS` is a copy pinned by sha256, and upstream-check opens a
+PR when Apache's copy changes. The pinned fingerprint still does the deciding.
 
 ## Build & test locally
 
@@ -726,7 +726,10 @@ x86-64-only, so arm64 is not exposed. `TEMURIN_VERSION_ARM64` in the Dockerfile,
 and `<version>/arm64=<version>` in `EXTRA_JRE`, hold the arm64 pin; empty means
 arm64 takes the x64 version. Both arches of a leg must name the same major or the
 build fails. upstream-check compares each arch's pin with Adoptium's latest for
-that arch, so it flags the override once aarch64 catches up. Until every pin is
+that arch and opens a bump PR: x64 moves without waiting for aarch64, and the
+override is deleted once aarch64 has the x64 build. A stale `EXTRA_JRE` leg is a
+warning, and a line in that PR, because the workflow token cannot push
+`build.yml`. Until every pin is
 fixed, the image also sets `JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics`.
 
 Only LTS versions go in that list without a specific reason. A feature release
@@ -791,9 +794,12 @@ babashka's gap is real and checked rather than assumed — `.sig` and `.asc` bot
 404 against its release assets, and `dockerfile_test.clj` asserts it stays
 checksum-only rather than quietly appearing verified.
 
-There is no cron — builds run on bumps. Renovate watches Jena via
-Maven Central, and [upstream-check.yml](.github/workflows/upstream-check.yml) runs
-weekly against `archive.apache.org` and opens an issue if a newer Fuseki exists.
+There is no cron — builds run on bumps.
+[upstream-check.yml](.github/workflows/upstream-check.yml) runs daily and opens
+a PR that moves `JENA_VERSION` or `TEMURIN_VERSION` when Apache or Adoptium ships
+a newer one (Temurin: same feature release only), and when Apache changes the
+Jena `KEYS` file vendored at `image/jena-KEYS`. Dependabot covers the base
+image and the actions.
 **Private first**;
 flip the package public when the are-we-happy gate is met — see the RFC's
 Distribution & CI section.

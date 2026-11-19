@@ -1,9 +1,22 @@
 name: upstream-check
 
-# Two questions on a timer, neither of which builds anything:
+# Four questions on a timer, none of which builds anything itself:
 #
-#   jena  — has Apache published a Fuseki newer than our pin?
-#   scan  — do the images we have ALREADY PUBLISHED now have fixable CVEs?
+#   jena     — has Apache published a Fuseki newer than our pin?
+#   temurin  — has Adoptium shipped a newer build of our Java feature release?
+#   jena-keys — has Apache changed the Jena KEYS file we vendor?
+#   scan     — do the images we have ALREADY PUBLISHED now have fixable CVEs?
+#
+# The first three answer with a PR that moves an ARG (ci/bump-pr.sh), not an
+# issue: the bump is one line, and a PR puts it through CI where a person merges
+# it. They used to open issues, which waited for someone to write that line.
+#
+# CI ON THOSE PRs. A PR opened with the workflow's GITHUB_TOKEN starts no other
+# workflow, so build.yml would not run and the ruleset's build-ok check would
+# never appear. Set the UPSTREAM_PR_TOKEN secret (a GitHub App installation token
+# or a fine-grained PAT with contents + pull-requests write on this repo) and the
+# PRs are opened as that identity, which does start CI. Without it the PR still
+# opens, and its body says to close and reopen it to start CI.
 #
 # The second exists because the CVE gate only ever ran at build time. Nothing
 # rebuilds on a schedule, by choice, so a published image rots quietly: `latest`
@@ -29,10 +42,16 @@ permissions:
 jobs:
   jena:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write
+      issues: write          # close the issues this job used to open
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Compare upstream Fuseki releases against our pin
         id: check
@@ -65,25 +84,15 @@ jobs:
             echo "newer=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open (or reuse) the bump issue
+      - name: Open (or keep) the bump PR
         if: steps.check.outputs.newer == 'true'
         env:
           UPSTREAM: ${{ steps.check.outputs.upstream }}
           PINNED: ${{ steps.check.outputs.pinned }}
-          REPO: ${{ github.repository }}
+          OWN_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN != '' }}
         run: |
           set -euo pipefail
-          TITLE="Jena ${UPSTREAM} published upstream — bump sp-fuseki (pinned ${PINNED})"
-
-          EXISTING="$(gh issue list --repo "$REPO" --state open --limit 100 \
-            --json number,title --jq ".[] | select(.title == \"${TITLE}\") | .number" | head -1)"
-          if [ -n "$EXISTING" ]; then
-            echo "issue #${EXISTING} already open — nothing to do"
-            exit 0
-          fi
-
-          gh label create upstream --repo "$REPO" --color 0e8a16 \
-            --description "New upstream release to pick up" >/dev/null 2>&1 || true
+          TITLE="Jena ${UPSTREAM} (from ${PINNED})"
 
           # printf, not a heredoc: an unindented heredoc terminator would end the
           # YAML block scalar this script lives in.
@@ -92,22 +101,23 @@ jobs:
           # markdown backticks and $ that must NOT be expanded by the shell.
           # shellcheck disable=SC2016
           {
-            printf 'Apache Jena Fuseki **%s** is on archive.apache.org. Our default pin is **%s**.\n\n' "$UPSTREAM" "$PINNED"
-            printf 'To pick it up:\n\n'
-            printf '1. `ARG JENA_VERSION=%s` in `image/Dockerfile` — that is the leg tagged `latest`.\n' "$UPSTREAM"
-            printf '2. Add the outgoing `%s` to `EXTRA_JENA` in `.github/workflows/build.yml` if we keep publishing it.\n' "$PINNED"
-            printf '3. Merge to `main` — build publishes `%s-<run>`, `%s`, and moves `latest`.\n\n' "$UPSTREAM" "$UPSTREAM"
-            printf 'Read the Jena release notes first. The smoke test asserts our packaging contract, not Jena correctness.\n\n'
-            printf 'Renovate should already have a PR open for step 1 (3-day `minimumReleaseAge`). If it does not, that is the real finding.\n\n'
-            printf '_Opened by the weekly `upstream-check` workflow._\n'
-          } > "${RUNNER_TEMP}/issue-body.md"
+            printf 'Apache Jena Fuseki **%s** is on archive.apache.org. This moves `ARG JENA_VERSION` from `%s`, the leg tagged `latest`.\n\n' "$UPSTREAM" "$PINNED"
+            printf 'Before merging:\n\n'
+            printf -- '- Read the Jena release notes. The smoke test asserts our packaging contract, not Jena correctness.\n'
+            printf -- '- If a different release manager signed it, the build fails on `JENA_SIGNING_FINGERPRINT`. Trusting a new signer is a person'"'"'s call: update the fingerprint on this branch.\n'
+            printf -- '- To keep publishing `%s`, add it to `EXTRA_JENA` in `ci/sp_fuseki/workflows.clj` and run `bb ci/generate.clj`.\n\n' "$PINNED"
+            if [ "$OWN_TOKEN" != "true" ]; then
+              printf '**CI has not run.** This PR was opened with the workflow token, which starts no other workflow. Close and reopen it to run `build`.\n\n'
+            fi
+            printf '_Opened by the `upstream-check` workflow._\n'
+          } > "${RUNNER_TEMP}/pr-body.md"
 
-          gh issue create --repo "$REPO" --title "$TITLE" --label upstream \
-            --body-file "${RUNNER_TEMP}/issue-body.md"
+          ci/bump-pr.sh JENA_VERSION "$PINNED" "$UPSTREAM" upstream/jena- "$TITLE" \
+            "${RUNNER_TEMP}/pr-body.md" "^Jena [0-9.]+ published upstream"
 
       - name: Up to date
         if: steps.check.outputs.newer != 'true'
-        run: echo "pin ${{ steps.check.outputs.pinned }} is current (upstream latest ${{ steps.check.outputs.upstream }}) — no issue opened"
+        run: echo "pin ${{ steps.check.outputs.pinned }} is current (upstream latest ${{ steps.check.outputs.upstream }}) — nothing to open"
 
   temurin:
     # The pin nothing else watches. Dependabot cannot see it — it is a string in
@@ -115,20 +125,39 @@ jobs:
     # lib/modules is not one. So the JVM is both unmanaged and unscanned, which is
     # how ours reached four quarterly security updates behind without a word.
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write
+      issues: write          # close the issues this job used to open
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
 
       # PER ARCH. Adoptium can publish one arch ahead of another: the
       # CVE-2026-114938 point releases shipped for x64 days before aarch64. So the
       # pin is per arch (TEMURIN_VERSION_ARM64, and `/arm64=` in EXTRA_JRE), and
-      # each arch's pin is checked against Adoptium's latest FOR THAT ARCH. That is
-      # what flags an arm64 override once aarch64 catches up, so it can go.
-      - name: Compare each arch's Temurin pin against Adoptium
+      # each arch's pin is checked against Adoptium's latest FOR THAT ARCH:
+      #
+      #   x64 moves to x64's latest when that sorts after the pin;
+      #   arm64 moves to aarch64's latest when that sorts after ITS pin, and the
+      #   override goes (empty) once arm64 would land on the x64 build.
+      #
+      # So x64 never waits on aarch64, and the override deletes itself when
+      # aarch64 catches up. Versions compare by ORDER (sort -V): a pin ahead of
+      # Adoptium's latest for an arch is left alone, never moved back.
+      - name: Compare each arch's Temurin pins against Adoptium
         id: check
+        env:
+          # The builds that fix CVE-2026-114938, per major. When every pin on every
+          # arch is at or past these, the bump PR says the JDK_JAVA_OPTIONS
+          # mitigation can go. Delete this with the mitigation.
+          CVE_FIXED_IN: "21.0.13.1 25.0.5.1"
         run: |
           set -euo pipefail
+          shopt -s inherit_errexit
           X64="$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)"
           [ -n "$X64" ] || { echo "could not read ARG TEMURIN_VERSION from image/Dockerfile" >&2; exit 1; }
           # Empty means arm64 takes TEMURIN_VERSION.
@@ -136,69 +165,216 @@ jobs:
           # build.yml is generated from ci/sp_fuseki/workflows.clj; it holds the
           # same value and is plain to read from here.
           EXTRA="$(sed -n 's/^ *EXTRA_JRE: *//p' .github/workflows/build.yml | head -1 | tr -d "\"'")"
-          : > "$RUNNER_TEMP/behind.tsv"
 
-          check() {  # arch pinned where
-            local arch="$1" pinned="$2" where="$3" major latest
-            major="${pinned%%[.+]*}"
-            # The same feature version we pin, so this reports a security update
-            # rather than nagging about the next Java release. Moving major is a
-            # decision; moving point releases is hygiene.
-            latest="$(curl -fsSL --retry 3 --retry-delay 5 \
-              "https://api.adoptium.net/v3/assets/latest/${major}/hotspot?image_type=jre&architecture=${arch}&os=linux" \
+          # True when $2 sorts strictly after $1.
+          newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ]; }
+
+          latest() {  # major arch
+            local v
+            v="$(curl -fsSL --retry 3 --retry-delay 5 \
+              "https://api.adoptium.net/v3/assets/latest/$1/hotspot?image_type=jre&architecture=$2&os=linux" \
               | jq -r '.[0].release_name // empty' | sed 's/^jdk-//')"
-            [ -n "$latest" ] || { echo "Adoptium returned no ${arch} release for ${major} — API shape changed" >&2; exit 1; }
-            if [ "$pinned" = "$latest" ]; then
-              echo "Temurin $major $arch: $pinned is current ($where)"
-            else
-              echo "Temurin $major $arch: pinned $pinned, current $latest ($where)"
-              printf '%s\t%s\t%s\t%s\t%s\n' "$major" "$arch" "$pinned" "$latest" "$where" >> "$RUNNER_TEMP/behind.tsv"
-            fi
+            [ -n "$v" ] || { echo "Adoptium returned no $2 release for $1 — API shape changed" >&2; exit 1; }
+            echo "$v"
           }
 
-          check x64 "$X64" "ARG TEMURIN_VERSION in image/Dockerfile"
-          if [ -n "$ARM" ]; then
-            check aarch64 "$ARM" "ARG TEMURIN_VERSION_ARM64 in image/Dockerfile"
-          else
-            check aarch64 "$X64" "ARG TEMURIN_VERSION in image/Dockerfile"
-          fi
+          # One leg's target: prints "<x64> <arm64 override, or ->".
+          target() {  # x64-pin arm64-override
+            local x="$1" a="$2" major lx la nx na
+            major="${x%%[.+]*}"
+            lx="$(latest "$major" x64)"
+            la="$(latest "$major" aarch64)"
+            nx="$x"; if newer "$x" "$lx"; then nx="$lx"; fi
+            na="${a:-$x}"; if newer "$na" "$la"; then na="$la"; fi
+            echo "Temurin $major: x64 $x -> $nx (Adoptium $lx); arm64 ${a:-$x} -> $na (Adoptium $la)" >&2
+            [ "$na" = "$nx" ] && na=""
+            echo "$nx ${na:--}"
+          }
+
+          # At or past the CVE fix for its major. A major with no listed fix is not.
+          fixed() {
+            local v="$1" f
+            for f in $CVE_FIXED_IN; do
+              [ "${f%%.*}" = "${v%%[.+]*}" ] || continue
+              if newer "$v" "$f"; then return 1; fi
+              return 0
+            done
+            return 1
+          }
+
+          ALL_FIXED=yes
+          T="$(target "$X64" "$ARM")"
+          NEW_X64="${T% *}"; NEW_ARM="${T#* }"; [ "$NEW_ARM" = "-" ] && NEW_ARM=""
+          if ! fixed "$NEW_X64" || ! fixed "${NEW_ARM:-$NEW_X64}"; then ALL_FIXED=no; fi
+
+          # EXTRA_JRE lives in workflows.clj and regenerates build.yml, which the
+          # workflow token may not push. So a stale leg is a warning here, and a
+          # line in the bump PR's body when there is one.
+          : > "$RUNNER_TEMP/extra.md"
           # Entries are <version> or <version>/arm64=<version>; the split is the point.
           for leg in $EXTRA; do
             v="${leg%%/arm64=*}"
             a="${leg#*/arm64=}"; [ "$a" = "$leg" ] && a=""
-            check x64 "$v" "EXTRA_JRE in ci/sp_fuseki/workflows.clj"
-            check aarch64 "${a:-$v}" "EXTRA_JRE in ci/sp_fuseki/workflows.clj"
+            T="$(target "$v" "$a")"
+            nv="${T% *}"; na="${T#* }"; [ "$na" = "-" ] && na=""
+            want="${nv}${na:+/arm64=$na}"
+            if [ "$want" != "$leg" ]; then
+              echo "::warning::EXTRA_JRE leg $leg is behind: set it to $want in ci/sp_fuseki/workflows.clj and run bb ci/generate.clj"
+              # shellcheck disable=SC2016  # backticks are markdown
+              printf -- '- `EXTRA_JRE` in `ci/sp_fuseki/workflows.clj`: `%s` → `%s`, then `bb ci/generate.clj`.\n' "$leg" "$want" >> "$RUNNER_TEMP/extra.md"
+            fi
+            if ! fixed "$nv" || ! fixed "${na:-$nv}"; then ALL_FIXED=no; fi
           done
 
-          if [ -s "$RUNNER_TEMP/behind.tsv" ]; then
-            echo "behind=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "behind=no" >> "$GITHUB_OUTPUT"
-          fi
+          # Only worth saying while the mitigation is still there.
+          grep -q '^ENV JDK_JAVA_OPTIONS=.*UseBASE64Intrinsics' image/Dockerfile || ALL_FIXED=no
 
-      - name: Open (or reuse) one bump issue per stale pin
-        if: steps.check.outputs.behind == 'yes'
+          if [ "$NEW_X64" != "$X64" ] || [ "$NEW_ARM" != "$ARM" ]; then CHANGED=yes; else CHANGED=no; fi
+          {
+            echo "changed=$CHANGED"
+            echo "x64=$X64"
+            echo "arm=$ARM"
+            echo "new_x64=$NEW_X64"
+            echo "new_arm=$NEW_ARM"
+            echo "major=${X64%%[.+]*}"
+            echo "all_fixed=$ALL_FIXED"
+          } >> "$GITHUB_OUTPUT"
+          echo "default leg: changed=$CHANGED x64 $X64 -> $NEW_X64, arm64 override '${ARM}' -> '${NEW_ARM}'; every pin fixed after bump: $ALL_FIXED"
+
+      - name: Open (or keep) the bump PR
+        if: steps.check.outputs.changed == 'yes'
         env:
-          REPO: ${{ github.repository }}
+          X64: ${{ steps.check.outputs.x64 }}
+          ARM: ${{ steps.check.outputs.arm }}
+          NEW_X64: ${{ steps.check.outputs.new_x64 }}
+          NEW_ARM: ${{ steps.check.outputs.new_arm }}
+          MAJOR: ${{ steps.check.outputs.major }}
+          ALL_FIXED: ${{ steps.check.outputs.all_fixed }}
+          OWN_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN != '' }}
         run: |
           set -euo pipefail
-          # fd 3, so nothing in the loop body can eat the list from stdin.
-          while IFS=$'\t' read -r -u 3 MAJOR ARCH PINNED LATEST WHERE; do
-            TITLE="Temurin ${MAJOR} ${ARCH}: pin is ${PINNED}, current is ${LATEST}"
-            # Title carries both versions, so a new release makes a NEW issue rather
-            # than silently editing one someone already read and closed.
-            EXISTING="$(gh issue list --repo "$REPO" --state open --limit 100 \
-                        --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
-            if [ -n "$EXISTING" ]; then echo "already open as #$EXISTING: $TITLE"; continue; fi
-            # shellcheck disable=SC2016  # backticks are markdown; values arrive as printf args
-            {
-              printf 'The %s pin for Temurin %s is `%s` (%s). Adoptium ships `%s` for %s.\n\n' "$ARCH" "$MAJOR" "$PINNED" "$WHERE" "$LATEST" "$ARCH"
-              printf 'Temurin point releases are quarterly security updates, so a stale pin means a JVM with known fixes missing.\n\n'
-              printf 'Nothing else catches this. Dependabot cannot parse the ARG — it is a string in a RUN, not a FROM. Trivy reads jars, and a JRE lib/modules is not one.\n\n'
-              printf 'Bump the pin and let CI rebuild. If this is an arm64 override (`TEMURIN_VERSION_ARM64`, or `/arm64=` in `EXTRA_JRE`) and `%s` is the x64 pin, delete the override instead. When no pin on any arch predates 21.0.13.1 / 25.0.5.1, remove the `JDK_JAVA_OPTIONS` CVE-2026-114938 mitigation and its test.\n' "$LATEST"
-            } > "$RUNNER_TEMP/temurin.md"
-            gh issue create --repo "$REPO" --title "$TITLE" --label upstream --body-file "$RUNNER_TEMP/temurin.md"
-          done 3< "$RUNNER_TEMP/behind.tsv"
+          # The arm64 override first; bump-pr.sh moves TEMURIN_VERSION and commits
+          # everything changed under image/.
+          sed -i "s/^ARG TEMURIN_VERSION_ARM64=.*/ARG TEMURIN_VERSION_ARM64=${NEW_ARM}/" image/Dockerfile
+          grep -qx "ARG TEMURIN_VERSION_ARM64=${NEW_ARM}" image/Dockerfile \
+            || { echo "could not set ARG TEMURIN_VERSION_ARM64=${NEW_ARM} in image/Dockerfile" >&2; exit 1; }
+          TITLE="Temurin ${NEW_X64}${NEW_ARM:+, arm64 $NEW_ARM} (from ${X64}${ARM:+, arm64 $ARM})"
+          # Backticks throughout are markdown, not command substitution.
+          # shellcheck disable=SC2016
+          {
+            printf 'Moves the Temurin %s pins in `image/Dockerfile`:\n\n' "$MAJOR"
+            if [ "$NEW_X64" = "$X64" ]; then
+              printf -- '- `TEMURIN_VERSION` (x64): stays `%s`\n' "$X64"
+            else
+              printf -- '- `TEMURIN_VERSION` (x64): `%s` → `%s`\n' "$X64" "$NEW_X64"
+            fi
+            if [ "$NEW_ARM" = "$ARM" ]; then
+              printf -- '- `TEMURIN_VERSION_ARM64`: stays `%s`. aarch64 has no `%s` yet.\n\n' "$ARM" "$NEW_X64"
+            elif [ -n "$NEW_ARM" ]; then
+              printf -- '- `TEMURIN_VERSION_ARM64`: `%s` → `%s`. aarch64 has no `%s` yet.\n\n' "${ARM:-(empty)}" "$NEW_ARM" "$NEW_X64"
+            else
+              printf -- '- `TEMURIN_VERSION_ARM64`: `%s` → empty. aarch64 has the x64 build, so the override goes.\n\n' "${ARM:-(empty)}"
+            fi
+            printf 'Temurin point releases carry the OpenJDK security fixes, so a stale pin is a JVM with known fixes missing. Trivy cannot see this: it reads jars, and a JRE lib/modules is not one.\n\n'
+            if [ -s "$RUNNER_TEMP/extra.md" ]; then
+              printf 'Also behind, and not in this PR (the workflow token may not push `build.yml`); make these on this branch:\n\n'
+              cat "$RUNNER_TEMP/extra.md"
+              printf '\n'
+            fi
+            if [ "$ALL_FIXED" = "yes" ]; then
+              printf 'With this PR%s, every pin on every arch carries the CVE-2026-114938 fix. The `JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics` mitigation in `image/Dockerfile`, its test in `test/dockerfile_test.clj` and `CVE_FIXED_IN` in this workflow can go.\n\n' \
+                "$([ -s "$RUNNER_TEMP/extra.md" ] && echo ' and the EXTRA_JRE changes above')"
+            fi
+            if [ "$OWN_TOKEN" != "true" ]; then
+              printf '**CI has not run.** This PR was opened with the workflow token, which starts no other workflow. Close and reopen it to run `build`.\n\n'
+            fi
+            printf '_Opened by the `upstream-check` workflow._\n'
+          } > "${RUNNER_TEMP}/pr-body.md"
+          # The branch names the whole target, both arches, so dropping the arm64
+          # override is a different PR from an x64 bump to the same version, and a
+          # closed x64 bump cannot block it.
+          if [ -n "$NEW_ARM" ]; then KEY="${NEW_X64}-arm64-${NEW_ARM}"
+          elif [ -n "$ARM" ]; then KEY="${NEW_X64}-arm64-dropped"
+          else KEY="$NEW_X64"; fi
+          BUMP_KEY="$KEY" \
+            ci/bump-pr.sh TEMURIN_VERSION "$X64" "$NEW_X64" "upstream/temurin-${MAJOR}-" "$TITLE" \
+            "${RUNNER_TEMP}/pr-body.md" "^Temurin ${MAJOR}: pin is "
+
+  jena-keys:
+    # image/jena-KEYS is a vendored copy, pinned by ARG JENA_KEYS_SHA256, so the
+    # build needs no network for it. This job is what keeps the copy honest: when
+    # Apache's KEYS changes it opens a PR carrying the new file and hash, so a key
+    # rotation is a reviewed change rather than a silent change of trust.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.UPSTREAM_PR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Compare Apache's Jena KEYS with the vendored copy
+        id: check
+        run: |
+          set -euo pipefail
+          PINNED="$(sed -n 's/^ARG JENA_KEYS_SHA256=//p' image/Dockerfile | head -1)"
+          [ -n "$PINNED" ] || { echo "could not read ARG JENA_KEYS_SHA256 from image/Dockerfile" >&2; exit 1; }
+          K="${RUNNER_TEMP}/KEYS"
+          # Two hosts, same file: one being down is not a finding.
+          curl -fsSL --retry 3 --retry-delay 5 https://downloads.apache.org/jena/KEYS -o "$K" \
+            || curl -fsSL --retry 3 --retry-delay 5 https://archive.apache.org/dist/jena/KEYS -o "$K"
+          NOW="$(sha256sum "$K" | cut -d' ' -f1)"
+          { echo "pinned=$PINNED"; echo "now=$NOW"; } >> "$GITHUB_OUTPUT"
+          if [ "$NOW" = "$PINNED" ]; then
+            echo "changed=no" >> "$GITHUB_OUTPUT"
+            echo "Jena KEYS unchanged ($NOW)"
+          else
+            echo "changed=yes" >> "$GITHUB_OUTPUT"
+            echo "Jena KEYS changed: pinned $PINNED, Apache now $NOW"
+          fi
+
+      - name: Open (or keep) the KEYS PR
+        if: steps.check.outputs.changed == 'yes'
+        env:
+          PINNED: ${{ steps.check.outputs.pinned }}
+          NOW: ${{ steps.check.outputs.now }}
+          OWN_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          fprs() {
+            gpg --batch --with-colons --import-options show-only --import "$1" 2>/dev/null \
+              | awk -F: '$1 == "fpr" { print $10 }' | sort -u
+          }
+          fprs image/jena-KEYS > "${RUNNER_TEMP}/old.fpr"
+          fprs "${RUNNER_TEMP}/KEYS" > "${RUNNER_TEMP}/new.fpr"
+          cp "${RUNNER_TEMP}/KEYS" image/jena-KEYS
+          TITLE="Jena KEYS changed upstream (${NOW:0:12})"
+          # Backticks throughout are markdown, not command substitution.
+          # shellcheck disable=SC2016
+          {
+            # shellcheck disable=SC2016  # backticks are markdown
+            printf 'Apache'"'"'s Jena `KEYS` no longer matches `image/jena-KEYS`. This PR carries the new file and moves `ARG JENA_KEYS_SHA256`.\n\n'
+            printf 'Fingerprints added (keys and subkeys):\n\n```\n'
+            comm -13 "${RUNNER_TEMP}/old.fpr" "${RUNNER_TEMP}/new.fpr"
+            printf '```\n\nFingerprints removed:\n\n```\n'
+            comm -23 "${RUNNER_TEMP}/old.fpr" "${RUNNER_TEMP}/new.fpr"
+            printf '```\n\n'
+            # shellcheck disable=SC2016
+            printf 'The build accepts only a signature from `JENA_SIGNING_FINGERPRINT`, so this PR alone changes no trust. A release signed by a new key also needs that fingerprint changed: check the key against the Apache committer key list first.\n\n'
+            if [ "$OWN_TOKEN" != "true" ]; then
+              # shellcheck disable=SC2016
+              printf '**CI has not run.** This PR was opened with the workflow token, which starts no other workflow. Close and reopen it to run `build`.\n\n'
+            fi
+            # shellcheck disable=SC2016
+            printf '_Opened by the `upstream-check` workflow._\n'
+          } > "${RUNNER_TEMP}/pr-body.md"
+          # Not upstream/jena-: the jena job closes every other PR on that prefix.
+          ci/bump-pr.sh JENA_KEYS_SHA256 "$PINNED" "$NOW" upstream/keys-jena- "$TITLE" \
+            "${RUNNER_TEMP}/pr-body.md"
+
   scan:
     # The published images, not a fresh build. A build would pull today's base and
     # come up clean while the thing our users are actually running stays broken —
@@ -207,7 +383,8 @@ jobs:
     permissions:
       contents: read
       issues: write
-      actions: write      # to start the rebuild that IS the fix
+      actions: write      # to start the rebuild that fixes Debian findings
+      pull-requests: read # to list the bump PRs when a rebuild cannot
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       IMAGE: ghcr.io/semantic-partners/sp-fuseki
@@ -311,26 +488,37 @@ jobs:
           {
             echo "Trivy found **$TOTAL** fixable HIGH/CRITICAL findings in images that are published right now."
             echo
-            echo "Fixable means the fix exists and our users are not running it. The base image tag floats, so"
-            echo "a rebuild usually picks it up with no source change: run the build workflow on \`main\`."
+            echo "Fixable means the fix exists and our users are not running it. Every build re-runs"
+            echo "\`apt-get upgrade\` (APT_REFRESH), so a rebuild of \`main\` takes Debian fixes with no source change."
             echo
             cat /tmp/findings.md
             echo "_Checked $(date -u +%Y-%m-%d\ %H:%M) UTC. This issue closes itself when a scan comes back clean._"
             echo "<!-- fingerprint:$FP -->"
           } > /tmp/body.md
 
-          # THE FIX IS A REBUILD. Not a code change, not a version bump: the base
-          # image tag floats, the patched package is already in the registry, and
-          # a rebuild picks it up. So trigger one — but only once per finding-set.
-          # If the same fingerprint comes back tomorrow, the rebuild did not clear
-          # it (the base image has not shipped the fix yet) and repeating it would
-          # republish identical bytes under a new tag every morning.
+          # A REBUILD FIXES DEBIAN PACKAGES: each build re-runs `apt-get upgrade`, so
+          # the patched package in the archive lands with no source change. Trigger
+          # one, once per finding-set. If the same fingerprint comes back tomorrow
+          # the rebuild did not clear it, and the cause is one a rebuild cannot
+          # reach — a jar that only a Jena bump replaces, a fix Debian has not
+          # shipped, or a tag no current build publishes. Say so, and point at the
+          # bump PRs, instead of republishing identical bytes every morning.
           PREV=""
           [ -n "$NUM" ] && PREV="$(gh issue view "$NUM" --repo "$REPO" --json body --jq '.body' \
                                    | sed -n 's/.*<!-- fingerprint:\([a-f0-9]*\) -->.*/\1/p' | head -1)"
           if [ "$PREV" = "$FP" ]; then
             echo "same findings as the last run ($FP) — a rebuild did not clear them, not repeating it"
-            REBUILD="no — unchanged since the last attempt"
+            REBUILD="no — the last rebuild did not clear these, so a rebuild cannot"
+            BUMPS="$(gh pr list --repo "$REPO" --state open --label upstream --json number,title \
+                       --jq '.[] | "- #\(.number) \(.title)"')"
+            {
+              echo
+              echo "**A rebuild cannot clear these.** Check, in order: a finding in a jar needs a Jena bump;"
+              echo "a finding on a tag no build publishes any more needs that tag rebuilt by a tag rule or retired;"
+              echo "otherwise Debian has not shipped the fix yet."
+              echo
+              if [ -n "$BUMPS" ]; then echo "Open bump PRs:"; echo; echo "$BUMPS"; else echo "No bump PR is open."; fi
+            } >> /tmp/body.md
           else
             gh workflow run build.yml --repo "$REPO" --ref main
             echo "dispatched a rebuild on main"

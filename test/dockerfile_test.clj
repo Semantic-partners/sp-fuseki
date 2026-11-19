@@ -155,6 +155,16 @@
     (testing "and no fixed --retry-delay, which defeats exponential backoff"
       (is (not (str/includes? (second curl) "--retry-delay"))))))
 
+(deftest jena-before-6-is-refused-at-build
+  ;; #33: a 5.x dist built green and could not start. The refusal must sit in the
+  ;; fetch stage, ahead of any download, so the mistake fails in seconds.
+  (let [fetch (second (str/split dockerfile #"(?m)^FROM "))
+        guard (first (filter #(str/includes? % "JENA_VERSION is not supported") (run-blocks fetch)))]
+    (is (some? guard) "the fetch stage refuses unsupported JENA_VERSION")
+    (is (< (str/index-of fetch "JENA_VERSION is not supported") (str/index-of fetch "$CURL"))
+        "before the first download")
+    (testing "the accepted patterns let 6.x and later through, and nothing older"
+      (is (str/includes? guard "[6-9].*|[1-9][0-9].*")))))
 (deftest the-debian-upgrade-reruns-on-every-build-stamp
   ;; The layer cache served a CACHED `apt-get upgrade` to the 2026-11-05 rebuild,
   ;; which then shipped the same 16 fixable findings it was dispatched to clear.
@@ -171,3 +181,21 @@
   ;; (TEMURIN_VERSION, TEMURIN_VERSION_ARM64, each EXTRA_JRE leg), is a build that
   ;; carries the fix (21.0.13.1+, 25.0.5.1+). The x64 pins are; arm64 is not yet.
   (is (re-find #"(?m)^ENV JDK_JAVA_OPTIONS=\"[^\"]*-XX:-UseBASE64Intrinsics" dockerfile)))
+
+(deftest jena-keys-are-vendored-and-pinned
+  ;; KEYS came from downloads.apache.org at build time with no fallback, and that
+  ;; one host failing broke an arm64 build.
+  (testing "the build fetches no KEYS"
+    (is (not (re-find #"\$CURL[^;]*KEYS" dockerfile))))
+  (testing "it copies the vendored file and checks the pinned hash before import"
+    (is (str/includes? dockerfile "COPY image/jena-KEYS /tmp/jena-KEYS"))
+    (let [block (first (filter #(str/includes? % "gpg --batch --quiet --import /tmp/jena-KEYS") (run-blocks dockerfile)))]
+      (is (some? block))
+      (is (< (str/index-of block "sha256sum -c") (str/index-of block "--import /tmp/jena-KEYS")))))
+  (testing "the pin is the hash of the file in the repo"
+    (let [pin (second (re-find #"(?m)^ARG JENA_KEYS_SHA256=([0-9a-f]{64})$" dockerfile))
+          md (java.security.MessageDigest/getInstance "SHA-256")
+          bytes (java.nio.file.Files/readAllBytes (java.nio.file.Paths/get "image/jena-KEYS" (make-array String 0)))
+          hex (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md bytes)))]
+      (is (some? pin))
+      (is (= pin hex) "update ARG JENA_KEYS_SHA256 in the same commit as image/jena-KEYS"))))
