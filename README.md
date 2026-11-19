@@ -718,6 +718,17 @@ ghcr.io/semantic-partners/sp-fuseki:6.2.0            # Temurin 21, the default
 ghcr.io/semantic-partners/sp-fuseki:6.2.0-jre25      # Temurin 25 (LTS)
 ```
 
+The pin is per arch. Adoptium can ship an arch late: the
+[CVE-2026-114938](https://nvd.nist.gov/vuln/detail/CVE-2026-114938) fix
+(21.0.13.1+2, 25.0.5.1+2) is out for x64 only, so amd64 images carry it and arm64
+images stay on 21.0.13+9 / 25.0.5+8 until aarch64 builds exist. The bug is
+x86-64-only, so arm64 is not exposed. `TEMURIN_VERSION_ARM64` in the Dockerfile,
+and `<version>/arm64=<version>` in `EXTRA_JRE`, hold the arm64 pin; empty means
+arm64 takes the x64 version. Both arches of a leg must name the same major or the
+build fails. upstream-check compares each arch's pin with Adoptium's latest for
+that arch, so it flags the override once aarch64 catches up. Until every pin is
+fixed, the image also sets `JDK_JAVA_OPTIONS=-XX:-UseBASE64Intrinsics`.
+
 Only LTS versions go in that list without a specific reason. A feature release
 stops receiving Temurin builds about six months after it ships — Java 24's last
 one was over a year ago — and an image with no security updates is the thing this

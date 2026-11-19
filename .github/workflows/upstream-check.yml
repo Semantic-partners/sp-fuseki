@@ -120,56 +120,85 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Compare the Temurin pin against Adoptium
+      # PER ARCH. Adoptium can publish one arch ahead of another: the
+      # CVE-2026-114938 point releases shipped for x64 days before aarch64. So the
+      # pin is per arch (TEMURIN_VERSION_ARM64, and `/arm64=` in EXTRA_JRE), and
+      # each arch's pin is checked against Adoptium's latest FOR THAT ARCH. That is
+      # what flags an arm64 override once aarch64 catches up, so it can go.
+      - name: Compare each arch's Temurin pin against Adoptium
         id: check
         run: |
           set -euo pipefail
-          PINNED="$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)"
-          [ -n "$PINNED" ] || { echo "could not read ARG TEMURIN_VERSION from image/Dockerfile" >&2; exit 1; }
-          MAJOR="${PINNED%%[.+]*}"
-          # The same feature version we pin, so this reports a security update
-          # rather than nagging about the next Java release. Moving major is a
-          # decision; moving point releases is hygiene.
-          LATEST="$(curl -fsSL --retry 3 --retry-delay 5 \
-            "https://api.adoptium.net/v3/assets/latest/${MAJOR}/hotspot?image_type=jre&architecture=x64&os=linux" \
-            | jq -r '.[0].release_name // empty' | sed 's/^jdk-//')"
-          [ -n "$LATEST" ] || { echo "Adoptium returned no release for ${MAJOR} — API shape changed" >&2; exit 1; }
-          {
-            echo "pinned=$PINNED"
-            echo "latest=$LATEST"
-            echo "major=$MAJOR"
-          } >> "$GITHUB_OUTPUT"
-          if [ "$PINNED" = "$LATEST" ]; then
-            echo "behind=no" >> "$GITHUB_OUTPUT"
-            echo "Temurin $MAJOR pin $PINNED is current"
+          X64="$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)"
+          [ -n "$X64" ] || { echo "could not read ARG TEMURIN_VERSION from image/Dockerfile" >&2; exit 1; }
+          # Empty means arm64 takes TEMURIN_VERSION.
+          ARM="$(sed -n 's/^ARG TEMURIN_VERSION_ARM64=//p' image/Dockerfile | head -1)"
+          # build.yml is generated from ci/sp_fuseki/workflows.clj; it holds the
+          # same value and is plain to read from here.
+          EXTRA="$(sed -n 's/^ *EXTRA_JRE: *//p' .github/workflows/build.yml | head -1 | tr -d "\"'")"
+          : > "$RUNNER_TEMP/behind.tsv"
+
+          check() {  # arch pinned where
+            local arch="$1" pinned="$2" where="$3" major latest
+            major="${pinned%%[.+]*}"
+            # The same feature version we pin, so this reports a security update
+            # rather than nagging about the next Java release. Moving major is a
+            # decision; moving point releases is hygiene.
+            latest="$(curl -fsSL --retry 3 --retry-delay 5 \
+              "https://api.adoptium.net/v3/assets/latest/${major}/hotspot?image_type=jre&architecture=${arch}&os=linux" \
+              | jq -r '.[0].release_name // empty' | sed 's/^jdk-//')"
+            [ -n "$latest" ] || { echo "Adoptium returned no ${arch} release for ${major} — API shape changed" >&2; exit 1; }
+            if [ "$pinned" = "$latest" ]; then
+              echo "Temurin $major $arch: $pinned is current ($where)"
+            else
+              echo "Temurin $major $arch: pinned $pinned, current $latest ($where)"
+              printf '%s\t%s\t%s\t%s\t%s\n' "$major" "$arch" "$pinned" "$latest" "$where" >> "$RUNNER_TEMP/behind.tsv"
+            fi
+          }
+
+          check x64 "$X64" "ARG TEMURIN_VERSION in image/Dockerfile"
+          if [ -n "$ARM" ]; then
+            check aarch64 "$ARM" "ARG TEMURIN_VERSION_ARM64 in image/Dockerfile"
           else
+            check aarch64 "$X64" "ARG TEMURIN_VERSION in image/Dockerfile"
+          fi
+          # Entries are <version> or <version>/arm64=<version>; the split is the point.
+          for leg in $EXTRA; do
+            v="${leg%%/arm64=*}"
+            a="${leg#*/arm64=}"; [ "$a" = "$leg" ] && a=""
+            check x64 "$v" "EXTRA_JRE in ci/sp_fuseki/workflows.clj"
+            check aarch64 "${a:-$v}" "EXTRA_JRE in ci/sp_fuseki/workflows.clj"
+          done
+
+          if [ -s "$RUNNER_TEMP/behind.tsv" ]; then
             echo "behind=yes" >> "$GITHUB_OUTPUT"
-            echo "Temurin $MAJOR: pinned $PINNED, current $LATEST"
+          else
+            echo "behind=no" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open (or reuse) the bump issue
+      - name: Open (or reuse) one bump issue per stale pin
         if: steps.check.outputs.behind == 'yes'
         env:
-          PINNED: ${{ steps.check.outputs.pinned }}
-          LATEST: ${{ steps.check.outputs.latest }}
-          MAJOR: ${{ steps.check.outputs.major }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TITLE="Temurin ${MAJOR}: pin is ${PINNED}, current is ${LATEST}"
-          # Title carries both versions, so a new release makes a NEW issue rather
-          # than silently editing one someone already read and closed.
-          EXISTING="$(gh issue list --repo "$REPO" --state open --limit 100 \
-                      --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
-          if [ -n "$EXISTING" ]; then echo "already open as #$EXISTING"; exit 0; fi
-          {
+          # fd 3, so nothing in the loop body can eat the list from stdin.
+          while IFS=$'\t' read -r -u 3 MAJOR ARCH PINNED LATEST WHERE; do
+            TITLE="Temurin ${MAJOR} ${ARCH}: pin is ${PINNED}, current is ${LATEST}"
+            # Title carries both versions, so a new release makes a NEW issue rather
+            # than silently editing one someone already read and closed.
+            EXISTING="$(gh issue list --repo "$REPO" --state open --limit 100 \
+                        --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
+            if [ -n "$EXISTING" ]; then echo "already open as #$EXISTING: $TITLE"; continue; fi
             # shellcheck disable=SC2016  # backticks are markdown; values arrive as printf args
-            printf '`image/Dockerfile` pins `ARG TEMURIN_VERSION=%s`. Adoptium ships `%s`.\n\n' "$PINNED" "$LATEST"
-            printf 'Temurin point releases are quarterly security updates, so a stale pin means a JVM with known fixes missing.\n\n'
-            printf 'Nothing else catches this. Dependabot cannot parse the ARG — it is a string in a RUN, not a FROM. Trivy reads jars, and a JRE lib/modules is not one.\n\n'
-            printf 'Bump the ARG and let CI rebuild. If EXTRA_JRE names a version of this same feature release, bump that too.\n'
-          } > /tmp/temurin.md
-          gh issue create --repo "$REPO" --title "$TITLE" --label upstream --body-file /tmp/temurin.md
+            {
+              printf 'The %s pin for Temurin %s is `%s` (%s). Adoptium ships `%s` for %s.\n\n' "$ARCH" "$MAJOR" "$PINNED" "$WHERE" "$LATEST" "$ARCH"
+              printf 'Temurin point releases are quarterly security updates, so a stale pin means a JVM with known fixes missing.\n\n'
+              printf 'Nothing else catches this. Dependabot cannot parse the ARG — it is a string in a RUN, not a FROM. Trivy reads jars, and a JRE lib/modules is not one.\n\n'
+              printf 'Bump the pin and let CI rebuild. If this is an arm64 override (`TEMURIN_VERSION_ARM64`, or `/arm64=` in `EXTRA_JRE`) and `%s` is the x64 pin, delete the override instead. When no pin on any arch predates 21.0.13.1 / 25.0.5.1, remove the `JDK_JAVA_OPTIONS` CVE-2026-114938 mitigation and its test.\n' "$LATEST"
+            } > "$RUNNER_TEMP/temurin.md"
+            gh issue create --repo "$REPO" --title "$TITLE" --label upstream --body-file "$RUNNER_TEMP/temurin.md"
+          done 3< "$RUNNER_TEMP/behind.tsv"
   scan:
     # The published images, not a fresh build. A build would pull today's base and
     # come up clean while the thing our users are actually running stays broken —

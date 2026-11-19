@@ -82,6 +82,18 @@
       (is (str/includes? (get-in (step-named id "build-push-action") [:with :build-args])
                          "TEMURIN_VERSION=${{ matrix.jre.version }}")
           (str id " must pass TEMURIN_VERSION through"))))
+  (testing "and the arm64 override, on every leg, so a leg never inherits the default leg's arm64 pin"
+    ;; The Dockerfile's TEMURIN_VERSION_ARM64 is the DEFAULT leg's (21). A -jre25
+    ;; leg that did not pass its own, even empty, would pair a 25 x64 JRE with a
+    ;; 21 arm64 one — the Dockerfile refuses that, but CI should never ask.
+    (doseq [id [:test :publish]]
+      (is (str/includes? (get-in (step-named id "build-push-action") [:with :build-args])
+                         "TEMURIN_VERSION_ARM64=${{ matrix.jre.arm64 }}")
+          (str id " must pass TEMURIN_VERSION_ARM64 through")))
+    (let [script (:run (second (:steps (job :plan))))]
+      (is (str/includes? script "ARG TEMURIN_VERSION_ARM64=") "read from the Dockerfile")
+      (is (str/includes? script "arm64:") "each leg object carries its override")
+      (is (str/includes? script "disagree on major") "a leg whose arches disagree on major is refused")))
   (testing "the default leg keeps the tags it already publishes"
     ;; If `6.2.0` gained a suffix, or a non-default leg could claim it, the meaning
     ;; of an existing tag would depend on which leg finished last.
