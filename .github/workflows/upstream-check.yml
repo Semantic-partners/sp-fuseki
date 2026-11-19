@@ -175,6 +175,9 @@ jobs:
               "https://api.adoptium.net/v3/assets/latest/$1/hotspot?image_type=jre&architecture=$2&os=linux" \
               | jq -r '.[0].release_name // empty' | sed 's/^jdk-//')"
             [ -n "$v" ] || { echo "Adoptium returned no $2 release for $1 — API shape changed" >&2; exit 1; }
+            # It flows into sed, a branch name and jq strings: a version, or nothing.
+            [[ $v =~ ^[0-9]+(\.[0-9]+)*\+[0-9]+$ ]] \
+              || { echo "Adoptium's $2 release for $1 is not a version: '$v'" >&2; exit 1; }
             echo "$v"
           }
 
@@ -268,7 +271,9 @@ jobs:
             else
               printf -- '- `TEMURIN_VERSION` (x64): `%s` → `%s`\n' "$X64" "$NEW_X64"
             fi
-            if [ "$NEW_ARM" = "$ARM" ]; then
+            if [ -z "$ARM" ] && [ -z "$NEW_ARM" ]; then
+              printf -- '- `TEMURIN_VERSION_ARM64`: unset; arm64 takes the x64 build.\n\n'
+            elif [ "$NEW_ARM" = "$ARM" ]; then
               printf -- '- `TEMURIN_VERSION_ARM64`: stays `%s`. aarch64 has no `%s` yet.\n\n' "$ARM" "$NEW_X64"
             elif [ -n "$NEW_ARM" ]; then
               printf -- '- `TEMURIN_VERSION_ARM64`: `%s` → `%s`. aarch64 has no `%s` yet.\n\n' "${ARM:-(empty)}" "$NEW_ARM" "$NEW_X64"
