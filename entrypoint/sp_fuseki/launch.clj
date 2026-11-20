@@ -148,6 +148,47 @@
     (when (and (.isDirectory d) (seq (jars-in d)))
       (str d))))
 
+(defn extra-path
+  "Where [[extra-dir]] looks, whether or not anything is there.
+
+  Separate from `extra-dir` because the two answer different questions: that one
+  answers \"is there a classpath to extend\", and nil is the right way to say no.
+  This one answers \"where would it have been\", which is what a log line needs
+  when the answer to the first was no."
+  [base]
+  (str (java.io.File. (str base) "extra")))
+
+;; Where people put jars when they do not put them in `$FUSEKI_BASE/extra`.
+;;
+;; `/fuseki/extra` is the near miss: it is one path segment from correct, it is
+;; what the classic `fuseki-server` script's documentation reads like if you skim
+;; it, and a COPY into it succeeds — so the image builds and the container dies at
+;; startup with a ClassNotFoundException naming a class that is sitting right
+;; there on disk.
+;;
+;; Silence is the wrong answer to that. The jars are evidence of intent: nobody
+;; puts a jar in a directory by accident.
+(def near-misses ["/fuseki/extra" "/opt/fuseki/extra"])
+
+(defn misplaced-jars
+  "Jars found where somebody plainly meant them to be loaded, and they will not be.
+
+  `[dir jars]` pairs, for every candidate that is not the real directory and holds
+  at least one jar. Empty is the normal answer.
+
+  `candidates` is an argument with a default rather than a closed-over constant, so
+  a test can point it at a temp directory. The absolute paths in `near-misses` are
+  the whole point of the check and also what makes it untestable without this — the
+  first version of this function passed its test by never running its body."
+  ([base] (misplaced-jars base near-misses))
+  ([base candidates]
+   (let [real (extra-path base)]
+     (for [d candidates
+           :when (not= d real)
+           :let [js (jars-in d)]
+           :when (seq js)]
+       [d js]))))
+
 (defn classpath
   "`jar`, plus every jar in `extra`. `dir/*` is the JVM's own wildcard, expanded by
   the launcher rather than the shell, so it survives `exec` with no globbing."
