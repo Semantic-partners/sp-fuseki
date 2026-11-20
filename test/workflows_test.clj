@@ -13,6 +13,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
             [cheshire.core :as json]
+            [babashka.process :as p]
             [sp-fuseki.workflows :as w]))
 
 (def wf w/build-workflow)
@@ -68,7 +69,7 @@
   (testing "plan reads the default from the Dockerfile and emits one object per leg"
     (let [script (:run (second (:steps (job :plan))))]
       (is (str/includes? script "ARG TEMURIN_VERSION=") "read from the Dockerfile, not duplicated in CI")
-      (is (str/includes? script "EXTRA_JRE") "extra legs come from a variable, like EXTRA_JENA")
+      (is (str/includes? script "image/extra-jre") "extra legs come from image/extra-jre, beside the Dockerfile")
       (testing "as objects, because the tag needs the major and the build-arg the whole version"
         (is (str/includes? script "version:"))
         (is (str/includes? script "major:"))
@@ -82,6 +83,68 @@
       (is (str/includes? (get-in (step-named id "build-push-action") [:with :build-args])
                          "TEMURIN_VERSION=${{ matrix.jre.version }}")
           (str id " must pass TEMURIN_VERSION through"))))
+  (testing "and the arm64 override, on every leg, so a leg never inherits the default leg's arm64 pin"
+    ;; The Dockerfile's TEMURIN_VERSION_ARM64 is the DEFAULT leg's (21). A -jre25
+    ;; leg that did not pass its own, even empty, would pair a 25 x64 JRE with a
+    ;; 21 arm64 one — the Dockerfile refuses that, but CI should never ask.
+    (doseq [id [:test :publish]]
+      (is (str/includes? (get-in (step-named id "build-push-action") [:with :build-args])
+                         "TEMURIN_VERSION_ARM64=${{ matrix.jre.arm64 }}")
+          (str id " must pass TEMURIN_VERSION_ARM64 through")))
+    (let [script (:run (second (:steps (job :plan))))]
+      (is (str/includes? script "ARG TEMURIN_VERSION_ARM64=") "read from the Dockerfile")
+      (is (str/includes? script "arm64:") "each leg object carries its override")
+      (is (str/includes? script "disagree on major") "a leg whose arches disagree on major is refused")))
+
+(deftest extra-jre-legs-live-beside-the-dockerfile
+  ;; upstream-check's bump PR moves every Java pin. It cannot push build.yml (the
+  ;; workflow token may not write workflow files), so a version held in the
+  ;; workflow is one no bot can update — it got a warning nobody read.
+  (let [script (:run (second (:steps (job :plan))))
+        version #"\d+\.\d+\.\d+(\.\d+)?\+\d+"]
+    (testing "plan reads the extra legs from image/extra-jre"
+      (is (str/includes? script "image/extra-jre")))
+    (testing "and the workflow holds no Java version of its own"
+      (is (nil? (get-in (job :plan) [:env :EXTRA_JRE])))
+      (is (not (re-find version (w/->yaml wf))) "no Temurin version anywhere in build.yml"))
+    (testing "through ci/jre-legs.sh, the parser upstream-check uses too"
+      (is (str/includes? script "ci/jre-legs.sh image/extra-jre")))))
+
+(defn- jre-legs
+  "Run ci/jre-legs.sh over `text`, written byte for byte, and return its exit
+  code and output."
+  [text]
+  (let [f (java.io.File/createTempFile "extra-jre" "")]
+    (try
+      (spit f text)
+      (let [{:keys [exit out err]} (p/shell {:out :string :err :string :continue true}
+                                            "bash" "ci/jre-legs.sh" (str f))]
+        {:exit exit :out out :err err})
+      (finally (.delete f)))))
+
+(deftest jre-legs-is-the-one-parser-and-it-is-strict
+  ;; The plan step and upstream-check once parsed image/extra-jre separately and
+  ;; disagreed: a CRLF file gave plan an arm64 pin of `25.0.5+8\r` and a leg of
+  ;; "\r", and `25.0.5+8 junk` was two legs to one and an error to the other.
+  (testing "the committed file has no carriage return (read raw: split-lines hides \\r)"
+    (is (not (str/includes? (slurp "image/extra-jre") "\r"))))
+  (testing "the committed file parses"
+    (is (zero? (:exit (jre-legs (slurp "image/extra-jre"))))))
+  (testing "a good file gives line, leg, x64 and arm64 per leg, comments skipped"
+    (is (= (str "2\t25.0.5.1+2/arm64=25.0.5+8\t25.0.5.1+2\t25.0.5+8\n"
+                "3\t21.0.13.1+2\t21.0.13.1+2\t\n")
+           (:out (jre-legs "# c\n25.0.5.1+2/arm64=25.0.5+8  # x\n21.0.13.1+2\n\n")))))
+  (testing "and refuses, loudly, anything that is not a leg"
+    (doseq [[why text] {"CRLF"              "# c\r\n25.0.5.1+2/arm64=25.0.5+8\r\n\r\n"
+                        "two words"         "25.0.5+8 junk\n"
+                        "empty override"    "25.0.5+8/arm64=\n"
+                        "majors disagree"   "25.0.5.1+2/arm64=21.0.13+9\n"
+                        "not a version"     "25.0.5\n"
+                        "junk after arm64"  "25.0.5.1+2/arm64=25.0.5+8/x\n"}]
+      (let [{:keys [exit out err]} (jre-legs text)]
+        (is (not (zero? exit)) (str why " must fail"))
+        (is (str/blank? out) (str why " must print no legs"))
+        (is (not (str/blank? err)) (str why " must say why"))))))
   (testing "the default leg keeps the tags it already publishes"
     ;; If `6.2.0` gained a suffix, or a non-default leg could claim it, the meaning
     ;; of an existing tag would depend on which leg finished last.

@@ -5,7 +5,7 @@
 #
 #   ci/bump-pr.sh ARG FROM TO PREFIX TITLE BODY_FILE [ISSUE_TITLE_REGEX]
 #
-# One branch per target version, PREFIX + TO with `+` spelled `-`, so a rerun
+# One branch per target version, PREFIX + TO (or $BUMP_KEY) with `+` spelled `-`, so a rerun
 # finds the PR it opened yesterday instead of opening another. Open bump PRs on
 # the same PREFIX for an older version are closed as superseded, and so are open
 # issues whose title matches ISSUE_TITLE_REGEX (a jq regex; the issues this job
@@ -17,7 +17,10 @@ set -euo pipefail
 
 ARG="$1" FROM="$2" TO="$3" PREFIX="$4" TITLE="$5" BODY="$6" ISSUES="${7:-}"
 REPO="${GITHUB_REPOSITORY:?}"
-BRANCH="${PREFIX}${TO//+/-}"
+# BUMP_KEY names the target when it is more than TO: the Temurin bump also moves
+# the arm64 override, and a different override is a different PR.
+KEY="${BUMP_KEY:-$TO}"
+BRANCH="${PREFIX}${KEY//+/-}"
 
 OPEN="$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
           --json number --jq '.[0].number // empty')"

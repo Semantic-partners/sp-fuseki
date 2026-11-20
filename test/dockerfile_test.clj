@@ -177,8 +177,9 @@
     (is (< (str/index-of final "ARG APT_REFRESH") (str/index-of final "apt-get upgrade")))))
 
 (deftest base64-intrinsic-stays-off-until-the-jre-is-fixed
-  ;; CVE-2026-114938. Remove this test with the ENV once TEMURIN_VERSION and every
-  ;; EXTRA_JRE are builds that carry the fix (21.0.13.1+, 25.0.5.1+).
+  ;; CVE-2026-114938. Remove this test with the ENV once every pin, on every arch
+  ;; (TEMURIN_VERSION, TEMURIN_VERSION_ARM64, each image/extra-jre leg), is a build that
+  ;; carries the fix (21.0.13.1+, 25.0.5.1+). The x64 pins are; arm64 is not yet.
   (is (re-find #"(?m)^ENV JDK_JAVA_OPTIONS=\"[^\"]*-XX:-UseBASE64Intrinsics" dockerfile)))
 
 (deftest jena-keys-are-vendored-and-pinned

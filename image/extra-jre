@@ -1,0 +1,17 @@
+# JRE legs CI publishes beside the Dockerfile's default (TEMURIN_VERSION), each
+# tagged <jena>-jre<major>. Read by build.yml's plan step and moved by
+# upstream-check's bump PR; it is not a build input.
+#
+# One leg per line: <x64 version>, or <x64 version>/arm64=<arm64 version> while
+# Adoptium has not built the x64 version for aarch64. Both must share a major.
+# upstream-check drops the /arm64= part once aarch64 catches up.
+#
+# 25 is the current LTS. It is not the default because Jena 6.x targets 21 (the
+# jar's manifest says Java-Version: 21), and moving the default changes what
+# `6.2.0` and `latest` mean. The leg exists for extension jars built for release
+# 22+ (java.lang.foreign is final from 22), which a 21 JVM refuses outright.
+#
+# LTS only, unless someone needs a feature release for a specific reason: a
+# feature release gets Temurin builds for about six months, then no security
+# updates at all.
+25.0.5.1+2/arm64=25.0.5+8

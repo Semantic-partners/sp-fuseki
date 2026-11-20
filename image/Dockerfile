@@ -18,11 +18,21 @@ ARG JENA_VERSION=6.2.0
 # a 21 JRE while claiming to be something else.
 #
 # Jena 6.x targets Java 21, so 21 stays the default and the leg that gets `latest`.
-# CI builds the versions in EXTRA_JRE alongside it. The reason those legs exist is
+# CI builds the versions in image/extra-jre alongside it. The reason those legs exist is
 # extension jars: `java.lang.foreign` (Panama) is a PREVIEW API in 21 and final in
 # 22, so a jar compiled for release 22 or later will not load on a 21 JVM at all —
 # it is refused on class file version before any API question arises.
-ARG TEMURIN_VERSION=21.0.13+9
+#
+# PER-ARCH PIN. TEMURIN_VERSION is the x64 build. TEMURIN_VERSION_ARM64 overrides
+# it for arm64, and empty means "same as TEMURIN_VERSION". It exists because
+# Adoptium can ship an arch ahead of the others: 21.0.13.1+2 (the CVE-2026-114938
+# fix, an x86-64-only bug) is out for x64 only, so arm64 stays on 21.0.13+9 until
+# aarch64 builds exist. upstream-check opens the PR that empties the override
+# when they do. Both must name the same major, or the build refuses.
+# CI passes both for every leg (image/extra-jre takes `<x64>/arm64=<arm64>`), so the
+# default here applies to the default leg and to local builds.
+ARG TEMURIN_VERSION=21.0.13.1+2
+ARG TEMURIN_VERSION_ARM64=21.0.13+9
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
 ARG BB_VERSION=1.12.216
 
@@ -41,6 +51,7 @@ ARG BB_VERSION=1.12.216
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS fetch
 ARG JENA_VERSION
 ARG TEMURIN_VERSION
+ARG TEMURIN_VERSION_ARM64
 ARG BB_VERSION
 ARG TARGETARCH
 
@@ -109,17 +120,21 @@ ARG TEMURIN_SIGNING_FINGERPRINT=3B04D753C9050D9A5D343F39843C48A565F8F04B
 # old 300s once two JRE legs were pulling it at once.
 ENV CURL="curl -fsSL --retry 8 --retry-max-time 900 --retry-all-errors --connect-timeout 20 --speed-limit 1024 --speed-time 30"
 
-# Temurin JRE for the TARGET arch, at whatever TEMURIN_VERSION says.
+# Temurin JRE for the TARGET arch: TEMURIN_VERSION, or TEMURIN_VERSION_ARM64 on
+# arm64 when set. No fallback on a failed download: a pin that 404s fails here.
 RUN set -eux; \
     case "$TARGETARCH" in \
-      amd64) JRE_ARCH=x64 ;; \
-      arm64) JRE_ARCH=aarch64 ;; \
+      amd64) JRE_ARCH=x64; V="$TEMURIN_VERSION" ;; \
+      arm64) JRE_ARCH=aarch64; V="${TEMURIN_VERSION_ARM64:-$TEMURIN_VERSION}" ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    V="$TEMURIN_VERSION"; \
     # Everything before the first dot or plus: "21.0.5+11" -> 21, "26+37" -> 26.
     MAJOR="$(echo "$V" | sed 's/[.+].*$//')"; \
-    case "$MAJOR" in ''|*[!0-9]*) echo "TEMURIN_VERSION=$V has no numeric major" >&2; exit 1 ;; esac; \
+    case "$MAJOR" in ''|*[!0-9]*) echo "Temurin version '$V' has no numeric major" >&2; exit 1 ;; esac; \
+    # The tag's -jre<major> comes from TEMURIN_VERSION, so an arm64 override on
+    # another major would publish a JRE under the wrong name.
+    [ "$MAJOR" = "$(echo "$TEMURIN_VERSION" | sed 's/[.+].*$//')" ] \
+      || { echo "FATAL: TEMURIN_VERSION_ARM64=$V and TEMURIN_VERSION=$TEMURIN_VERSION disagree on major" >&2; exit 1; }; \
     echo "jre: Temurin $V (major $MAJOR) for $JRE_ARCH"; \
     TAG="jdk-$(echo "$V" | sed 's/+/%2B/')"; \
     FILE="OpenJDK${MAJOR}U-jre_${JRE_ARCH}_linux_hotspot_$(echo "$V" | sed 's/+/_/').tar.gz"; \
@@ -266,10 +281,12 @@ ENV PATH="/opt/jre/bin:${PATH}"
 # writes past its buffer on x86-64 CPUs with that extension. Fuseki reaches
 # java.util.Base64 without authentication: xsd:base64Binary literals in a query,
 # the Basic auth header, multipart uploads. The fix is OpenJDK 21.0.13.1 /
-# 25.0.5.1; until Temurin ships those, turn the intrinsic off. The flag exists on
-# every arch (it is a no-op on arm64) and costs only Base64 decode speed.
-# JDK_JAVA_OPTIONS is read by the `java` launcher whatever JVM_ARGS says, so a
-# user's heap settings do not drop it. Remove once the pin is a fixed build.
+# 25.0.5.1, which the x64 pins now are; the arm64 pins are not, since Adoptium
+# has not built them for aarch64 (arm64 is not affected by the bug). The flag
+# exists on every arch (it is a no-op on arm64) and costs only Base64 decode
+# speed. JDK_JAVA_OPTIONS is read by the `java` launcher whatever JVM_ARGS says,
+# so a user's heap settings do not drop it. Remove once every pin, on every arch,
+# is a fixed build.
 ENV JDK_JAVA_OPTIONS="-XX:-UseBASE64Intrinsics"
 
 # The whole entrypoint tree: entrypoint.clj (orchestration) + sp_fuseki/render.clj

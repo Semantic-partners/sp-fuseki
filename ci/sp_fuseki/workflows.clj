@@ -159,7 +159,11 @@
   "Objects, not strings: the tag needs the MAJOR (\"25\") while the build-arg needs
   the whole version (\"25.0.4.1+1\"), and a GitHub expression cannot cut one out of
   the other — that language has no regex. So plan emits both, plus whether the leg
-  is the default, which is what decides whether the tag carries a suffix."
+  is the default, which is what decides whether the tag carries a suffix.
+
+  `arm64` is that leg's arm64 override, empty when arm64 takes `version` too.
+  Adoptium can publish an arch late — the CVE-2026-114938 point releases shipped
+  for x64 only — and a leg must not wait for the slowest arch to fix the others."
   "${{ fromJSON(needs.plan.outputs.jres) }}")
 
 
@@ -199,25 +203,13 @@
      ;;
      ;; The mechanism stays: add a version here to publish it alongside the
      ;; Dockerfile's pin, and the gate will tell you if it's patchable.
-     ;; EXTRA_JRE is EMPTY by default, so the axis adds nothing until someone
-     ;; needs it. Why it exists: `java.lang.foreign` (Panama) is preview in 21 and
-     ;; final in 22, so an extension jar compiled for release 22+ will not load on
-     ;; the default 21 JVM at all — refused on class file version, before any API
-     ;; question. A leg per JRE is cheaper than telling that user to build their
-     ;; own image, which is the argument this repository exists to make.
-     :env (m :EXTRA_JENA ""
-             ;; 25 is the current LTS and where anyone doing this seriously should
-             ;; land. It is here rather than as the default because Jena 6.x
-             ;; targets 21 — the jar's own manifest says Java-Version: 21 — and a
-             ;; default that moves ahead of upstream's target changes what `6.2.0`
-             ;; and `latest` mean for people already pulling them.
-             ;;
-             ;; NOT 24, and the reason generalises: it is a feature release whose
-             ;; last Temurin build was over a year ago, so it takes no security
-             ;; updates. Publishing it would contradict the gate that made us drop
-             ;; the 6.1.0 Jena leg. Only LTS versions belong in this list unless
-             ;; someone needs a feature release for a specific reason.
-             :EXTRA_JRE "25.0.5+8")
+     ;;
+     ;; The extra JRE legs are NOT here. They live in image/extra-jre, beside the
+     ;; Dockerfile's TEMURIN_VERSION, because upstream-check's bump PR moves them
+     ;; and the workflow token may not push this file's output. A Java version in
+     ;; this file is one no bot can update. Why the axis exists, and why 25 and not
+     ;; 24: see that file.
+     :env (m :EXTRA_JENA "")
      :outputs (m :default "${{ steps.p.outputs.default }}"
                  :matrix "${{ steps.p.outputs.matrix }}"
                  :jres "${{ steps.p.outputs.jres }}"
@@ -233,13 +225,27 @@
                           "MATRIX=\"$(printf '%s\\n' $EXTRA_JENA \"$DEF\" | sed '/^$/d' | sort -u -V | jq -R . | jq -sc .)\"\n"
                           "JRE_DEF=\"$(sed -n 's/^ARG TEMURIN_VERSION=//p' image/Dockerfile | head -1)\"\n"
                           "[ -n \"$JRE_DEF\" ] || { echo \"could not read ARG TEMURIN_VERSION from image/Dockerfile\" >&2; exit 1; }\n"
-                          "# One object per JRE leg: the whole version for the build-arg, the major for\n"
-                          "# the tag, and whether it is the default — which decides whether that tag\n"
-                          "# carries a -jre suffix at all.\n"
+                          "# Empty when arm64 takes the same build as x64.\n"
+                          "JRE_ARM64_DEF=\"$(sed -n 's/^ARG TEMURIN_VERSION_ARM64=//p' image/Dockerfile | head -1)\"\n"
+                          "# The extra legs, from image/extra-jre through ci/jre-legs.sh: the one\n"
+                          "# parser, shared with upstream-check, which fails on anything not a leg.\n"
+                          "EXTRA_JRE=\"$(ci/jre-legs.sh image/extra-jre | cut -f2)\"\n"
+                          "# One object per JRE leg: the whole version for the build-arg, the arm64\n"
+                          "# override (empty = same), the major for the tag, and whether it is the\n"
+                          "# default — which decides whether that tag carries a -jre suffix at all.\n"
+                          "# A leg is `<version>` or `<version>/arm64=<version>`; arches that disagree\n"
+                          "# on major would publish one JRE under another's tag, so jq refuses them.\n"
                           "# shellcheck disable=SC2086\n"
-                          "JRES=\"$(printf '%s\\n' $EXTRA_JRE \"$JRE_DEF\" | sed '/^$/d' | sort -u -V \\\n"
-                          "  | jq -R --arg def \"$JRE_DEF\" '{version: ., major: (.|split(\".\")[0]|split(\"+\")[0]), default: (. == $def)}' \\\n"
+                          "JRES=\"$(printf '%s\\n' $EXTRA_JRE \"${JRE_DEF}${JRE_ARM64_DEF:+/arm64=$JRE_ARM64_DEF}\" \\\n"
+                          "  | sed '/^$/d' | sort -u -V \\\n"
+                          "  | jq -R --arg def \"$JRE_DEF\" '\n"
+                          "      def major: split(\".\")[0] | split(\"+\")[0];\n"
+                          "      . as $leg | split(\"/arm64=\") as [$v, $a] | ($a // \"\") as $a\n"
+                          "      | if $a != \"\" and ($a | major) != ($v | major)\n"
+                          "        then error(\"JRE leg \\($leg): arm64 and x64 disagree on major\") else . end\n"
+                          "      | {version: $v, arm64: $a, major: ($v | major), default: ($v == $def)}' \\\n"
                           "  | jq -sc .)\"\n"
+                          "echo \"jre legs: $JRES\"\n"
                           "OWNER=\"$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')\"\n"
                           "# CalVer plus the commit, computed ONCE so every Jena leg of a run agrees.\n"
                           "# UTC: a stamp in local time is ambiguous twice a year and wrong to anyone\n"
@@ -280,6 +286,10 @@
                          :platforms "linux/${{ matrix.arch }}"
                          :build-args (str "JENA_VERSION=${{ matrix.jena }}\n"
                                           "TEMURIN_VERSION=${{ matrix.jre.version }}\n"
+                                          ;; Always passed, empty included: an empty
+                                          ;; override must beat the Dockerfile's
+                                          ;; default-leg arm64 pin on other legs.
+                                          "TEMURIN_VERSION_ARM64=${{ matrix.jre.arm64 }}\n"
                                           apt-refresh-arg)
                          ;; Shared with publish, so JRE/Fuseki/babashka download
                          ;; once per leg rather than once per job. Fewer requests
@@ -358,6 +368,10 @@
                          :platforms "linux/${{ matrix.arch }}"
                          :build-args (str "JENA_VERSION=${{ matrix.jena }}\n"
                                           "TEMURIN_VERSION=${{ matrix.jre.version }}\n"
+                                          ;; Always passed, empty included: an empty
+                                          ;; override must beat the Dockerfile's
+                                          ;; default-leg arm64 pin on other legs.
+                                          "TEMURIN_VERSION_ARM64=${{ matrix.jre.arm64 }}\n"
                                           apt-refresh-arg)
                          :outputs (str "type=image,name=" image
                                        ",push-by-digest=true,name-canonical=true,push=true")
