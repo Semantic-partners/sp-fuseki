@@ -32,7 +32,7 @@ ARG JENA_VERSION=6.2.0
 # CI passes both for every leg (image/extra-jre takes `<x64>/arm64=<arm64>`), so the
 # default here applies to the default leg and to local builds.
 ARG TEMURIN_VERSION=21.0.13.1+2
-ARG TEMURIN_VERSION_ARM64=21.0.13+9
+ARG TEMURIN_VERSION_ARM64=
 # renovate: datasource=github-releases depName=babashka/babashka extractVersion=^v(?<version>.*)$
 ARG BB_VERSION=1.12.216
 

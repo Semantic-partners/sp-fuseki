@@ -14,4 +14,4 @@
 # LTS only, unless someone needs a feature release for a specific reason: a
 # feature release gets Temurin builds for about six months, then no security
 # updates at all.
-25.0.5.1+2/arm64=25.0.5+8
+25.0.5.1+2
