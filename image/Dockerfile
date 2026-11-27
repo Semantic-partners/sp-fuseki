@@ -11,7 +11,7 @@
 # This is the DEFAULT Jena — the leg CI tags `latest`. CI also builds the older
 # versions listed in EXTRA_JENA (.github/workflows/build.yml) via --build-arg.
 # renovate: datasource=maven depName=org.apache.jena:jena-fuseki-server
-ARG JENA_VERSION=6.2.0
+ARG JENA_VERSION=6.3.0
 # Temurin JRE. The MAJOR is derived from this string, not written twice, because
 # the release repo (`temurin<major>-binaries`) and the filename (`OpenJDK<major>U-`)
 # both encode it — and a matrix over JREs that hardcoded 21 in either would fetch
